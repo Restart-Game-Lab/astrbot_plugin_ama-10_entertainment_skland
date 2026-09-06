@@ -33,11 +33,14 @@ from .src.client import SklandClient
 from .src.service import AutoCheckinScheduler, SklandService
 from .src.storage import Storage
 
-# 插件数据目录: 官方 <AstrBot>/data/plugin_data/<插件id>/ (自动创建, 目录名=注册名)
-DATA_DIR = StarTools.get_data_dir()
-
 # 验证码等待超时(秒)
 CODE_WAIT_TIMEOUT = 60
+
+# 插件数据目录: <AstrBot>/data/plugin_data/<插件id>/
+# ⚠️ 不能在此处(模块导入时)调用 StarTools.get_data_dir() —— 它靠调用栈回溯
+#   + star_map 查找调用者模块, 而模块导入阶段本插件尚未注册进 star_map,
+#   会抛 "Unable to resolve metadata"。因此延迟到 __init__(实例化、注册完成后)解析。
+_PLUGIN_ID = "astrbot_plugin_ama_10_entertainment_skland"
 
 
 @register(
@@ -54,7 +57,9 @@ class Main(Star):
         super().__init__(context)
         self.config = config or {}
 
-        self.storage = Storage(DATA_DIR)
+        # 插件数据目录(注册完成后解析, 显式传插件名避免依赖调用栈/star_map)
+        self.data_dir = StarTools.get_data_dir(_PLUGIN_ID)
+        self.storage = Storage(self.data_dir)
         self.service = SklandService(
             self.storage,
             timeout=float(self.config.get("request_timeout", 15)),
