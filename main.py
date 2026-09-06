@@ -19,7 +19,6 @@
 
 import asyncio
 import re
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,7 +41,6 @@ class _CodeSession:
     uid: str
     phone: str
     event: Any = None  # 发起事件的引用(仅超时提示时 send 用)
-    last_remind: float = 0.0  # 上次回复"格式不正确"的时间戳(节流用)
     timeout_task: asyncio.Task | None = None  # 超时任务(取消用)
 
 
@@ -157,13 +155,7 @@ class Main(Star):
         # 只有流程发起者本人后续发的消息才会被处理, 其他用户消息直接忽略
         msg = event.message_str.strip()
         if not (msg.isdigit() and len(msg) == 6):
-            # 节流: 5 秒内不重复回复"格式不正确"(防机器人自身消息回传造成刷屏)
-            now = time.time()
-            if now - session.last_remind >= 5:
-                session.last_remind = now
-                await event.send(
-                    event.plain_result("🔴 验证码格式不正确，请重新发送 6 位数字验证码"),
-                )
+            # 不合法验证码: 静默忽略(不回复不提示), 等 60s 超时自动结束流程
             event.stop_event()
             return
         code = msg
