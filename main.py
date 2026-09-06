@@ -111,14 +111,8 @@ class Main(Star):
         pass
 
     @skland.command("login")
-    async def skland_login(self, event: AstrMessageEvent):
+    async def skland_login(self, event: AstrMessageEvent, phone: str):
         """/skland login <手机号>: 发送验证码, 60s 内等待用户回复验证码完成登录"""
-        args = event.get_message_args()
-        if not args:
-            yield event.plain_result("🟡 用法: /skland login <手机号>\n"
-                                     "插件会发送短信验证码，请在 60 秒内回复验证码完成登录")
-            return
-        phone = args[0]
         if not re.fullmatch(r"1\d{10}", phone):
             yield event.plain_result(f"🔴 手机号 {phone} 格式不正确，应为 11 位国内手机号")
             return
