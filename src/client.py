@@ -243,9 +243,25 @@ class SklandClient:
         d = data["data"]
         return d["cred"], d["token"]
 
+    def user_me(self, cred: str, token: str) -> dict:
+        """⑥ 拉取森空岛用户信息（带签名），data.user 含 id/nickname/avatar。
+
+        App 版同款接口: /api/v1/user/me, 返回森空岛真实用户名(data.user.nickname)。
+        """
+        path = "/api/v1/user/me"
+        resp = self.session.get(
+            f"{ZONAI_HOST}{path}",
+            headers=self._sk_headers(token=token, cred=cred, path=path, body_or_query=""),
+            timeout=self.timeout,
+        )
+        data = self._check(resp, "user/me")
+        if data.get("code") != 0:
+            raise RuntimeError(f"[user/me] 失败: {data.get('message')} (code={data.get('code')})")
+        return data.get("data", {})
+
     # ---------- 业务 ----------
     def get_binding_list(self, cred: str, token: str):
-        """⑥ 拉取游戏绑定列表（带签名）"""
+        """⑦ 拉取游戏绑定列表（带签名）"""
         path = "/api/v1/game/player/binding"
         resp = self.session.get(
             f"{ZONAI_HOST}{path}",

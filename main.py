@@ -178,12 +178,15 @@ class Main(Star):
             login_token=auth["login_token"], device_token=auth["device_token"],
             hg_id=auth["hgId"],
             fingerprint=auth.get("fingerprint"),
+            nick_name=auth.get("nickName", ""),
         )
         self.storage.save_sub(session.uid, self._uid(event))  # 推送目标按用户 key 存
-        dev = auth.get("device_name") or auth.get("device_model") or ""
-        dev_txt = f"📱 设备: {dev}\n" if dev else ""
+        dev = f"{auth.get('device_brand', '')} | {auth.get('device_name', '')}".strip(" |")
+        nick = auth.get("nickName", "(未设置昵称)")
+        dev_txt = f"[登录设备]: {dev}\n" if dev else ""
         await event.send(event.plain_result(
-            f"🟢 登录成功\n用户: {auth.get('nickName', '(未设置昵称)')}（hgId={auth['hgId']}）\n"
+            f"🟢 登录成功\n"
+            f"[登录用户]: {nick} | {session.phone[:3]}****{session.phone[-4:]} (hgId={auth['hgId']})\n"
             f"{dev_txt}"
             "凭据已保存，可随时 /skland checkin 签到"
         ))
@@ -301,19 +304,23 @@ class Main(Star):
     async def skland_status(self, event: AstrMessageEvent):
         """/skland status: 查看当前用户状态"""
         auth = self.storage.load_auth(self._uid(event))
-        lines = ["森空岛签到状态"]
 
         if auth:
             phone, a = next(iter(auth.items()))
-            lines.append(f"🟢 已绑定 {self._mask_phone(phone)}（保存于 {a.get('saved_at', '?')}）")
-            dev = (a.get("fingerprint") or {}).get("device_name") or a.get("device_model") or "(未知)"
-            lines.append(f"📱 设备: {dev}")
+            nick = a.get("nickName") or "(未设置昵称)"
+            lines = [f"🟢 已绑定 {self._mask_phone(phone)}"]
+            lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
+            dev = a.get("fingerprint") or {}
+            dev_txt = f"{dev.get('device_brand') or ''} | {dev.get('device_name') or '(未知)'}"
+            dev_txt = dev_txt.strip(" |") or "(未知)"
+            lines.append(f"[登录设备]: {dev_txt}")
         else:
-            lines.append("🟡 未绑定手机号")
+            lines = ["🟡 未绑定手机号"]
 
         game_txt = "开启" if self.service.game_enabled else "关闭"
         forum_txt = "开启" if self.service.forum_enabled else "关闭"
         auto_on = self._auto_checkin_enabled and bool(self._auto_time)
+        lines.append("[签到配置]:")
         lines.append(f"自动签到: {'开启 (' + self._auto_time + ')' if auto_on else '关闭'}")
         lines.append(f"随机延迟: {self._random_delay}s")
         lines.append(f"游戏签到: {game_txt}")

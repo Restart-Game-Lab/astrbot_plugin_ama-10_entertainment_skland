@@ -42,13 +42,24 @@ class SklandService:
             u = {}
         auth_code = client.grant(token, device_token)
         cred, cred_token = client.generate_cred(auth_code)
+
+        # 森空岛真实用户名: 优先 user/me(App 同款, 带签名), 失败回退 basic_info
+        nick = ""
+        try:
+            me = client.user_me(cred, cred_token)
+            nick = (me.get("user") or {}).get("nickname") or ""
+        except Exception:
+            logger.debug("AMA-10 Skland: user/me 获取昵称失败, 回退 basic_info")
+        if not nick:
+            nick = u.get("nickName") or ""
+
         return {
             "cred": cred,
             "token": cred_token,
             "login_token": token,
             "device_token": device_token,
             "hgId": hg_id,
-            "nickName": u.get("nickName") or "(未设置昵称)",
+            "nickName": nick or "(未设置昵称)",
             # 登录使用的完整设备指纹(持久化复用)
             "fingerprint": fingerprint_to_dict(client.fp),
             "device_model": client.fp["device_model"],
@@ -137,8 +148,9 @@ class SklandService:
         for p, a in auth.items():
             # 设备行(取自 auth 存指纹, 与请求一致; 老账号无指纹显示未知)
             dev = a.get("fingerprint") or {}
-            dev_name = dev.get("device_name") or dev.get("device_model") or "(未知)"
-            lines.append(f"📱 设备: {dev_name}")
+            dev_txt = f"{dev.get('device_brand') or ''} | {dev.get('device_name') or ''}"
+            dev_txt = dev_txt.strip(" |") or "(未知)"
+            lines.append(f"[登录设备]: {dev_txt}")
 
             try:
                 g = await asyncio.to_thread(self.do_checkin, p, a)
@@ -160,14 +172,33 @@ class SklandService:
                     device_token=a.get("device_token", ""),
                     hg_id=a.get("hgId", ""),
                     fingerprint=g["fp"],
+                    nick_name=a.get("nickName", ""),
                 )
 
-            # 分组输出: 设备行(已在上面) + 游戏行 + 论坛行 + 失败说明
-            lines.append(f"游戏: {self._mask_phone(p)}")
-            lines.extend(g.get("game_ok", []) or ["🟢 (无绑定游戏)"])
-            lines.extend(g.get("game_err", []))  # 已含游戏名与原因
+            # 分组输出: [游戏签到] / [论坛签到] 段落 + 失败说明
+            # 标题按全局结果: 全成功=🟢签到完成 / 全失败=🔴签到失败 / 部分失败=🟡签到完成异常
+            game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
+            game_rows += g.get("game_err", [])
+            game_ok_n = len(g.get("game_ok", []))
+            game_err_n = len(g.get("game_err", []))
+            forum_balls = (g.get("forum_row") or "").split()
+            forum_ok_n = forum_balls.count("🟢")
+            forum_err_n = len(g.get("forum_err", []))
+            fail_n = game_err_n + forum_err_n
+
+            if fail_n == 0:
+                head = "🟢 签到完成"
+            elif (game_ok_n + forum_ok_n) == 0:
+                head = "🔴 签到失败"
+            else:
+                head = "🟡 签到完成异常"
+
+            lines.append(head)
+            lines.append(f"[游戏签到]:")
+            lines.extend(game_rows)
             if g.get("forum_row"):
-                lines.append(f"论坛: {g['forum_row']}")
+                lines.append(f"[论坛签到]:")
+                lines.append(g["forum_row"])
             lines.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
 
         return "\n".join(lines)

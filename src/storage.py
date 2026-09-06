@@ -116,11 +116,13 @@ class Storage:
 
     def set_auth(self, uid: str, phone: str, cred: str, token: str,
                  login_token: str = "", device_token: str = "",
-                 hg_id: str = "", fingerprint: dict | None = None):
+                 hg_id: str = "", fingerprint: dict | None = None,
+                 nick_name: str = ""):
         """保存指定用户的一个账号凭据, 同时登记手机号占用。
 
         ⚠️ 一人一手机号: 若该用户已有其他手机号, 先释放旧手机号占用再存新的。
         fingerprint: 登录时使用的完整设备指纹(持久化复用, 防风控)。
+        nick_name: 森空岛用户名(展示用, 旧数据无则空)。
         """
         all_auth = self.load_auth()
         user_auth = all_auth.setdefault(uid, {})
@@ -136,6 +138,7 @@ class Storage:
             "login_token": login_token,
             "device_token": device_token,
             "hgId": hg_id,
+            "nickName": nick_name,
             "fingerprint": fingerprint or {},
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
