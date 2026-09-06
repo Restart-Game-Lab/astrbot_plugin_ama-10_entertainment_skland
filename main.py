@@ -27,6 +27,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .src.client import SklandClient
+from .src.recall import RecallManager
 from .src.service import AutoCheckinScheduler, SklandService
 from .src.storage import Storage
 
@@ -85,6 +86,15 @@ class Main(Star):
         self._auto_time = self._parse_auto_time(self.config.get("auto_checkin_time", "08:00"))
         self._random_delay = max(int(self.config.get("random_delay_seconds", 1200)), 0)
 
+        # 自动撤回配置（消息显示几秒后自动撤回 + 阻断 LLM 链路）
+        scopes_raw = str(self.config.get("auto_recall_scopes", "all") or "all")
+        scopes = {s.strip().lower() for s in scopes_raw.split(",") if s.strip().lower()}
+        self.recall = RecallManager(
+            enabled=bool(self.config.get("auto_recall_enabled", False)),
+            delay=float(self.config.get("auto_recall_delay_seconds", 10)),
+            scopes=scopes or {"all"},
+        )
+
         # 自动签到调度器（静默执行, 不推送消息）
         # 总开关 auto_checkin_enabled 关闭 → 不启动; 开启但时间非法 → 不启动
         self.scheduler = AutoCheckinScheduler(
@@ -97,6 +107,66 @@ class Main(Star):
             logger.info("AMA-10 Skland: 自动签到已关闭 (auto_checkin_enabled=false)")
         elif not self._auto_time:
             logger.info("AMA-10 Skland: 自动签到未启用 (auto_checkin_time 为空)")
+
+    # ---------- 发送 + 自动撤回 + 阻断 LLM ----------
+    async def _send_and_recall(self, event, text: str, scope: str = "all"):
+        """统一的插件消息发送入口。
+
+        行为:
+          1. 主动发送消息（直接调协议端 API 拿到 message_id, 用于后续撤回）
+          2. call_llm=True 阻断 LLM 链路（无条件, 防止插件回复被 AI 接手）
+          3. 按配置延迟 N 秒后自动撤回（仅 aiocqhttp 平台, 失败仅日志）
+          4. 发送后将事件标记为已发送（_has_send_oper), 双保险阻断 LLM
+
+        返回: 是否成功发送。发送不依赖 yield, 命令 handler 可直接 await。
+        """
+        try:
+            # 直接调协议端 API 主动发送（拿到 message_id, 用于撤回）
+            mid = await self._send_raw(event, text)
+        except Exception as e:
+            logger.warning(f"AMA-10 Skland: 主动发送失败, 回退 event.send: {e}")
+            await event.send(event.plain_result(text))
+            event.call_llm = True  # 回退路径也阻断 LLM（_has_send_oper 已由 send 设置）
+            return False
+
+        event.call_llm = True  # 无条件阻断 LLM 链路
+        if mid:
+            self.recall.schedule_recall(getattr(event, "bot", None), mid, scope)
+        return True
+
+    async def _send_raw(self, event, text: str):
+        """绕开框架直接调 OneBot 协议端发送, 返回 message_id（或 None）。
+
+        仅 aiocqhttp 平台有效; 非该平台返回 None（由调用方回退 event.send）。
+        """
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
+            )
+        except Exception:
+            return None
+        if not isinstance(event, AiocqhttpMessageEvent):
+            return None
+        bot = event.bot
+        session_id = event.get_group_id() or event.get_sender_id()
+        if event.get_group_id():
+            ret = await bot.call_action(
+                "send_group_msg",
+                group_id=int(session_id),
+                message=[{"type": "text", "data": {"text": text}}],
+            )
+        else:
+            ret = await bot.call_action(
+                "send_private_msg",
+                user_id=int(session_id),
+                message=[{"type": "text", "data": {"text": text}}],
+            )
+        return ret.get("message_id") if ret else None
+
+    def _stop_and_block_llm(self, event):
+        """阻断 LLM + 终止事件传播（对不回消息路径也用）"""
+        event.call_llm = True
+        event.stop_event()
 
     # ---------- 配置 ----------
     @staticmethod
@@ -163,9 +233,11 @@ class Main(Star):
         try:
             auth = await asyncio.to_thread(self.service.login, session.phone, code)
         except Exception as e:
-            await event.send(event.plain_result(
-                f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login"
-            ))
+            await self._send_and_recall(
+                event,
+                f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login",
+                scope="login",
+            )
             self._end_session(session)
             event.stop_event()
             return
@@ -184,12 +256,14 @@ class Main(Star):
         dev = f"{auth.get('device_brand', '')} | {auth.get('device_name', '')}".strip(" |")
         nick = auth.get("nickName", "(未设置昵称)")
         dev_txt = f"[登录设备]: {dev}\n" if dev else ""
-        await event.send(event.plain_result(
+        await self._send_and_recall(
+            event,
             f"🟢 登录成功\n"
             f"[登录用户]: {nick} | {session.phone[:3]}****{session.phone[-4:]} (hgId={auth['hgId']})\n"
             f"{dev_txt}"
-            "凭据已保存，可随时 /skland checkin 签到"
-        ))
+            "凭据已保存，可随时 /skland checkin 签到",
+            scope="login",
+        )
         self._end_session(session)
         event.stop_event()  # 验证码已被消费, 事件不再向下传播
 
@@ -202,7 +276,12 @@ class Main(Star):
     async def skland_login(self, event: AstrMessageEvent, phone: str):
         """/skland login <手机号>: 发送验证码, 60s 内等待用户回复验证码完成登录"""
         if not re.fullmatch(r"1\d{10}", phone):
-            yield event.plain_result(f"🔴 手机号 {phone} 格式不正确，应为 11 位国内手机号")
+            await self._send_and_recall(
+                event,
+                f"🔴 手机号 {phone} 格式不正确，应为 11 位国内手机号",
+                scope="login",
+            )
+            self._stop_and_block_llm(event)
             return
 
         uid = self._uid(event)
@@ -210,38 +289,54 @@ class Main(Star):
         # 一人一手机号: 当前用户已有账号则禁止再加第二个
         bound_phone = self.storage.get_user_phone(uid)
         if bound_phone and bound_phone != phone:
-            yield event.plain_result(
+            await self._send_and_recall(
+                event,
                 f"🔴 你已绑定手机号 {self._mask_phone(bound_phone)}\n"
-                "每人仅可绑定一个手机号。如需更换请先 /skland logout"
+                "每人仅可绑定一个手机号。如需更换请先 /skland logout",
+                scope="login",
             )
+            self._stop_and_block_llm(event)
             return
 
         # 已有凭据直接复用(仅限当前用户, 同手机号)
         cached = self.storage.get_auth(uid, phone)
         if cached:
-            yield event.plain_result(
+            await self._send_and_recall(
+                event,
                 f"🟡 {self._mask_phone(phone)} 已有保存凭据（保存于 {cached.get('saved_at', '?')}）\n"
-                "可直接 /skland checkin 签到；强制重登请先 /skland logout"
+                "可直接 /skland checkin 签到；强制重登请先 /skland logout",
+                scope="login",
             )
+            self._stop_and_block_llm(event)
             return
 
         # 手机号占用检查: 若被其他用户占用, 拒绝登录(除非对方 logout 释放)
         if self.storage.is_phone_occupied(phone, by_uid=uid):
-            yield event.plain_result(
+            await self._send_and_recall(
+                event,
                 f"🔴 手机号 {self._mask_phone(phone)} 已被其他用户占用\n"
-                "请等待占用者 /skland logout 解除占用后再尝试登录"
+                "请等待占用者 /skland logout 解除占用后再尝试登录",
+                scope="login",
             )
+            self._stop_and_block_llm(event)
             return
 
         # ① 发送验证码
         try:
             self.service.send_code(phone)
         except Exception as e:
-            yield event.plain_result(f"🔴 验证码发送失败: {e}")
+            await self._send_and_recall(
+                event,
+                f"🔴 验证码发送失败: {e}",
+                scope="login",
+            )
+            self._stop_and_block_llm(event)
             return
-        yield event.plain_result(
+        await self._send_and_recall(
+            event,
             f"🟢 验证码已发送到 {self._mask_phone(phone)}\n"
-            f"请 {CODE_WAIT_TIMEOUT} 秒内回复收到的验证码（6 位数字）"
+            f"请 {CODE_WAIT_TIMEOUT} 秒内回复收到的验证码（6 位数字）",
+            scope="login",
         )
 
         # ② 注册验证码等待会话(参考 shitu 插件的 waiting_sessions):
@@ -252,7 +347,7 @@ class Main(Star):
         key = self._session_key(event)
         self._register_session(session, key)
         # 命令已注册等待会话, 本事件不再向下传播(避免被其他插件/AI 接手)
-        event.stop_event()
+        self._stop_and_block_llm(event)
 
     def _register_session(self, session: _CodeSession, key: str):
         """注册等待会话, 并启动超时任务"""
@@ -284,10 +379,13 @@ class Main(Star):
             if session_now is session:
                 self._end_session(session)
                 try:
-                    await session.event.send(session.event.plain_result(
+                    await self._send_and_recall(
+                        session.event,
                         f"🟡 等待验证码超时（{CODE_WAIT_TIMEOUT} 秒），流程已结束\n"
-                        "如仍需登录请重新执行 /skland login <手机号>"
-                    ))
+                        "如仍需登录请重新执行 /skland login <手机号>",
+                        scope="login",
+                    )
+                    self._stop_and_block_llm(session.event)
                 except Exception as e:
                     logger.warning(f"AMA-10 Skland: 超时提示发送失败: {e}")
         except asyncio.CancelledError:
@@ -298,7 +396,8 @@ class Main(Star):
         """/skland logout: 清除当前用户的全部已保存凭据"""
         n = self.storage.clear_user(self._uid(event))
         self.storage.save_sub(self._uid(event), "")
-        yield event.plain_result(f"🟢 已清除你的 {n} 个账号凭据")
+        await self._send_and_recall(event, f"🟢 已清除你的 {n} 个账号凭据", scope="logout")
+        self._stop_and_block_llm(event)
 
     @skland.command("status")
     async def skland_status(self, event: AstrMessageEvent):
@@ -325,14 +424,16 @@ class Main(Star):
         lines.append(f"随机延迟: {self._random_delay}s")
         lines.append(f"游戏签到: {game_txt}")
         lines.append(f"论坛签到: {forum_txt}")
-        yield event.plain_result("\n".join(lines))
+        await self._send_and_recall(event, "\n".join(lines), scope="status")
+        self._stop_and_block_llm(event)
 
     @skland.command("checkin")
     async def skland_checkin(self, event: AstrMessageEvent):
         """/skland checkin: 手动签到一次（当前用户自己的全部游戏+论坛版块）"""
         uid = self._uid(event)
         self.storage.save_sub(uid, self._uid(event))  # 推送目标按用户 key 存(与凭据 key 一致)
-        yield event.plain_result(await self.service.checkin_all(uid))
+        await self._send_and_recall(event, await self.service.checkin_all(uid), scope="checkin")
+        self._stop_and_block_llm(event)
 
     # ---------- 工具 ----------
     @staticmethod

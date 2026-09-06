@@ -34,5 +34,23 @@
     "hint": "勾选后在 /skland checkin 时为绑定游戏（明日方舟/终末地）执行签到。",
     "type": "bool",
     "default": true
+  },
+  "auto_recall_enabled": {
+    "description": "是否自动撤回插件发出的消息",
+    "hint": "开启后插件发出的所有消息（登录/签到/状态等）在显示几秒后自动撤回，默认关闭。",
+    "type": "bool",
+    "default": false
+  },
+  "auto_recall_delay_seconds": {
+    "description": "自动撤回延迟（秒）",
+    "hint": "消息发出后延迟多少秒再撤回，默认 10 秒（保留短暂可见时间）。",
+    "type": "int",
+    "default": 10
+  },
+  "auto_recall_scopes": {
+    "description": "自动撤回的消息范围",
+    "hint": "逗号分隔。留空或 'all' 表示全部消息撤回；或填入 login,checkin,status,logout 等命令名限定范围。",
+    "type": "string",
+    "default": "all"
   }
 }
