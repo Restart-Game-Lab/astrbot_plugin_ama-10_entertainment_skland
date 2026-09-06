@@ -2,15 +2,23 @@
 
 - auth.json  : 多用户多账号凭据, 按用户 -> 手机号 两级保存
               {
-                "<unified_msg_origin>": { "18600000000": {cred...}, ... },
+                "<用户key>": { "18600000000": {cred...}, ... },
                 ...
               }
-- owners.json: 手机号占用索引 { "18600000000": "<uid>" }，保证一个手机号
+              用户 key = "平台id:发送者id"(如 aiocqhttp:10001),
+              保证群内多人互不干扰(见 main._uid)。
+- owners.json: 手机号占用索引 { "18600000000": "<用户key>" }，保证一个手机号
               同一时间只被一个用户占用；logout 后释放
-- sub.json   : 用户 -> 推送目标(unified_msg_origin) 映射, 供自动签到推送
+- sub.json   : 用户 -> 推送目标(用户 key) 映射, 供自动签到推送
+
+旧版兼容: 早期版本曾用 unified_msg_origin(如 aiocqhttp:GroupMessage:群号)
+作为用户 key, 群维度无法区分人。__init__ 时会把「私聊」旧 key
+(aiocqhttp:PrivateMessage:QQ号) 无损迁移到 aiocqhttp:QQ号;
+「群」旧 key 无法还原到人, 保留原样, 由 load_auth 按提示重登。
 """
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -26,6 +34,53 @@ class Storage:
         self._auth_file = data_dir / "auth.json"
         self._owners_file = data_dir / "owners.json"
         self._sub_file = data_dir / "sub.json"
+        self._migrate_legacy_keys()
+
+    # ---------- 旧版 key 迁移 ----------
+    def _migrate_legacy_keys(self):
+        """一次性迁移旧版 unified_msg_origin 用户 key -> 平台id:发送者id。
+
+        - 私聊 key (platform:PrivateMessage:QQ号): 无损迁移为 platform:QQ号
+        - 群 key (platform:GroupMessage:群号): 多人共享无法还原到人, 保留原样
+          (load_auth 时若命中会提示重新登录)
+        """
+        auth = self._load_json(self._auth_file, {})
+        owners = self._load_json(self._owners_file, {})
+        subs = self._load_json(self._sub_file, {})
+        changed = False
+
+        for src in list(auth):
+            m = re.fullmatch(r"(.+):PrivateMessage:(\d+)", src)
+            if not m:
+                continue
+            dst = f"{m.group(1)}:{m.group(2)}"
+            if dst != src and dst not in auth:
+                auth[dst] = auth.pop(src)
+                # 同步 owners: phone -> src 改成 dst
+                for phone, owner in list(owners.items()):
+                    if owner == src:
+                        owners[phone] = dst
+                # 同步 sub: src -> dst
+                if src in subs:
+                    subs[dst] = subs.pop(src)
+                changed = True
+                logger.info(f"AMA-10 Skland: 凭据 key {src} -> {dst} 已迁移")
+
+        # 群共享旧 key 无法还原到人: 释放其手机号占用(避免新用户被死占用挡住)
+        for src in list(auth):
+            if ":GroupMessage:" in src:
+                for phone, owner in list(owners.items()):
+                    if owner == src:
+                        owners.pop(phone, None)
+                        changed = True
+                        logger.info(
+                            f"AMA-10 Skland: 释放旧群共享凭据 {src} 的手机号 {phone} 占用"
+                        )
+
+        if changed:
+            self._save_json(self._auth_file, auth)
+            self._save_json(self._owners_file, owners)
+            self._save_json(self._sub_file, subs)
 
     # ---------- 文件读写 ----------
     def _load_json(self, path: Path, default):

@@ -127,7 +127,7 @@ class SklandService:
         """签到指定用户(单人)的全部账号，返回给用户/日志的摘要文本。
 
         Args:
-            uid: 用户标识(unified_msg_origin)。只签该用户自己的账号, 不影响他人。
+            uid: 用户标识(平台id:发送者id)。只签该用户自己的账号, 不影响他人。
         """
         auth = self.storage.load_auth(uid)
         if not auth:
@@ -162,7 +162,15 @@ class SklandService:
                     fingerprint=g["fp"],
                 )
 
-            # 分组输出（你的样式）
+            # 分组输出: 设备行(已在上面) + 游戏行 + 论坛行 + 失败说明
+            lines.append(f"游戏: {self._mask_phone(p)}")
+            lines.extend(g.get("game_ok", []) or ["🟢 (无绑定游戏)"])
+            lines.extend(g.get("game_err", []))  # 已含游戏名与原因
+            if g.get("forum_row"):
+                lines.append(f"论坛: {g['forum_row']}")
+            lines.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
+
+        return "\n".join(lines)
 
     async def checkin_all_users(self) -> None:
         """自动签到(静默): 遍历所有已登录用户, 各自签到自己的账号。

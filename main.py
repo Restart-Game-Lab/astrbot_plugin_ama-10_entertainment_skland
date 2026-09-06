@@ -111,24 +111,24 @@ class Main(Star):
             return None
         return f"{hour:02d}:{minute:02d}"
 
-    # ---------- 命令组 ----------
+    # ---------- 用户身份 key ----------
     @staticmethod
     def _uid(event: AstrMessageEvent) -> str:
-        """用户标识: 用 unified_msg_origin 区分「同一个人的同会话」, 实现单人隔离"""
-        return event.unified_msg_origin
+        """用户标识(数据隔离 key): 平台id + 发送者id。
+
+        ⚠️ 不能用 unified_msg_origin: 群消息里整个群共享同一个值,
+        它只能区分「群/私聊会话」, 不能区分人。若以它为 key 存取凭据,
+        群里任何人都会共享/操作同一份凭据(查/签/清互串)。
+        用发送者 id: 私有互不干扰, 群内也按人隔离。
+        (与验证码等待会话 key 同构, 见 _session_key)
+        """
+        return f"{event.get_platform_id()}:{event.get_sender_id()}"
 
     # ---------- 验证码等待(自实现, 替代 session_waiter) ----------
     @staticmethod
     def _session_key(event: AstrMessageEvent) -> str:
-        """验证码等待会话的隔离 key: 平台id + 发送者id。
-
-        ⚠️ 不能用 unified_msg_origin: 群消息里整个群共享同一个值,
-        群里任何成员的消息(以及机器人自己回复的消息)都会命中会话,
-        造成重复回复甚至“机器人回复 -> 再命中 -> 再回复”的自我触发死循环。
-        用发送者 id 则机器人(自己的 id)与其他人天然隔离。
-        (等待实现参考 astrbot_plugin_shitu 的 waiting_sessions)
-        """
-        return f"{event.get_platform_id()}:{event.get_sender_id()}"
+        """验证码等待会话的隔离 key, 与 _uid() 同构(平台id + 发送者id)。"""
+        return Main._uid(event)
 
     @filter.event_message_type(
         filter.EventMessageType.ALL,
@@ -171,7 +171,7 @@ class Main(Star):
             hg_id=auth["hgId"],
             fingerprint=auth.get("fingerprint"),
         )
-        self.storage.save_sub(session.uid, event.unified_msg_origin)
+        self.storage.save_sub(session.uid, self._uid(event))  # 推送目标按用户 key 存
         dev = auth.get("device_name") or auth.get("device_model") or ""
         dev_txt = f"📱 设备: {dev}\n" if dev else ""
         session.future.set_result(
@@ -294,7 +294,7 @@ class Main(Star):
     async def skland_checkin(self, event: AstrMessageEvent):
         """/skland checkin: 手动签到一次（当前用户自己的全部游戏+论坛版块）"""
         uid = self._uid(event)
-        self.storage.save_sub(uid, event.unified_msg_origin)
+        self.storage.save_sub(uid, self._uid(event))  # 推送目标按用户 key 存(与凭据 key 一致)
         yield event.plain_result(await self.service.checkin_all(uid))
 
     # ---------- 工具 ----------
