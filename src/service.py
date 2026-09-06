@@ -12,6 +12,9 @@ import logging
 import random
 from datetime import datetime, timedelta
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 from .client import SklandClient, dict_to_fingerprint, fingerprint_to_dict
 from .storage import Storage
 
@@ -219,9 +222,17 @@ class SklandService:
 
 # ============================ 自动签到 ============================
 class AutoCheckinScheduler:
-    """每日自动签到调度器: 在 auto_checkin_time 后随机延迟 0~random_delay 秒静默签到。
+    """每日自动签到调度器（基于 APScheduler AsyncIOScheduler）。
 
+    参考 Azincc/astrbot_plugin_skland 的定时方案:
+      - AsyncIOScheduler + CronTrigger(hour, minute): 到点触发
+      - misfire_grace_time: 错过触发时间(如休眠/重启)仍补执行
+      - 随机延迟 0~random_delay 秒 + 按日期去重, 避免重复/固定时刻风控
     ⚠️ 静默模式: 不推送任何消息, 结果仅记录日志。
+
+    生命周期:
+      - start(): 启动调度器并注册每日任务（建议在 Star.initialize() 中调用）
+      - stop(): 停止调度器并取消任务（建议在 Star.terminate() 中调用）
     """
 
     def __init__(self, service: SklandService,
@@ -231,43 +242,57 @@ class AutoCheckinScheduler:
         self.auto_time = auto_time  # "HH:MM" 或 None(关闭)
         self.random_delay = max(int(random_delay), 0)
         self._last_checkin_date = ""
-        self._task: asyncio.Task | None = None
+        self._scheduler: AsyncIOScheduler | None = None
 
     def start(self):
-        if self.auto_time and self._task is None:
-            self._task = asyncio.create_task(self._loop())
+        """启动调度器（幂等）"""
+        if not self.auto_time or self._scheduler is not None:
+            return
+        hour, minute = int(self.auto_time[:2]), int(self.auto_time[3:5])
+        self._scheduler = AsyncIOScheduler()
+        try:
+            # 先移除旧任务(重载插件时防重复注册)
+            self._scheduler.remove_job("skland_auto_checkin")
+        except Exception:
+            pass
+        self._scheduler.add_job(
+            self._run_once,
+            trigger=CronTrigger(hour=hour, minute=minute),
+            id="skland_auto_checkin",
+            misfire_grace_time=3600,  # 错过(休眠/暂停)1小时内仍补执行
+            replace_existing=True,
+        )
+        self._scheduler.start()
+        logger.info(f"AMA-10 Skland: 自动签到任务已启动，每天 {hour:02d}:{minute:02d} 执行")
 
     def stop(self):
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        """停止调度器（幂等）"""
+        if self._scheduler:
+            if self._scheduler.running:
+                self._scheduler.shutdown(wait=False)
+            self._scheduler = None
 
-    async def _loop(self):
-        hour, minute = int(self.auto_time[:2]), int(self.auto_time[3:5])
-        while True:
-            try:
-                now = datetime.now()
-                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if target <= now:
-                    target += timedelta(days=1)
-                await asyncio.sleep((target - now).total_seconds())
+    async def _run_once(self):
+        """每日触发一次: 随机延迟 -> 日期去重 -> 静默签到"""
+        try:
+            # 每次触发都重新读配置(防重载后配置未生效)
+            if not self.service.storage.load_auth():
+                logger.info("AMA-10 Skland: 自动签到跳过, 无已登录用户")
+                return
 
-                if not self.service.storage.load_auth():
-                    continue
+            if self.random_delay > 0:
+                delay = random.randint(0, self.random_delay)
+                logger.info(f"AMA-10 Skland: 自动签到随机延迟 {delay}s")
+                await asyncio.sleep(delay)
 
-                if self.random_delay > 0:
-                    delay = random.randint(0, self.random_delay)
-                    logger.info(f"AMA-10 Skland: 自动签到随机延迟 {delay}s")
-                    await asyncio.sleep(delay)
+            today = datetime.now().strftime("%Y-%m-%d")
+            if today == self._last_checkin_date:
+                return
+            self._last_checkin_date = today
 
-                today = datetime.now().strftime("%Y-%m-%d")
-                if today == self._last_checkin_date:
-                    continue
-                self._last_checkin_date = today
-
-                # 静默签到: 不推送消息
-                await self.service.checkin_all_users()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.error(f"AMA-10 Skland: 自动签到循环异常: {e}")
+            # 静默签到: 不推送消息
+            await self.service.checkin_all_users()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"AMA-10 Skland: 自动签到执行异常: {e}")

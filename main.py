@@ -97,16 +97,25 @@ class Main(Star):
 
         # 自动签到调度器（静默执行, 不推送消息）
         # 总开关 auto_checkin_enabled 关闭 → 不启动; 开启但时间非法 → 不启动
+        # ⚠️ 启动移到 initialize()（插件激活钩子）: __init__ 阶段保证有事件循环,
+        #    但 APScheduler 的 AsyncIOScheduler 在 initialize() 中启动更可靠
         self.scheduler = AutoCheckinScheduler(
             service=self.service,
             auto_time=self._auto_time if self._auto_checkin_enabled else None,
             random_delay=self._random_delay,
         )
+
+    async def initialize(self):
+        """插件激活时调用: 启动自动签到调度"""
         self.scheduler.start()
         if not self._auto_checkin_enabled:
             logger.info("AMA-10 Skland: 自动签到已关闭 (auto_checkin_enabled=false)")
         elif not self._auto_time:
             logger.info("AMA-10 Skland: 自动签到未启用 (auto_checkin_time 为空)")
+
+    async def terminate(self):
+        """插件卸载/重载时调用: 停止自动签到调度, 避免残留任务重复触发"""
+        self.scheduler.stop()
 
     # ---------- 发送 + 自动撤回 + 阻断 LLM ----------
     async def _send_and_recall(self, event, text: str, scope: str = "all"):
