@@ -19,15 +19,12 @@
 
 import asyncio
 import re
+from dataclasses import dataclass, field
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.core.utils.session_waiter import (
-    SessionController,
-    session_waiter,
-)
 
 from .src.client import SklandClient
 from .src.service import AutoCheckinScheduler, SklandService
@@ -35,6 +32,20 @@ from .src.storage import Storage
 
 # 验证码等待超时(秒)
 CODE_WAIT_TIMEOUT = 60
+
+
+@dataclass
+class _CodeSession:
+    """一次验证码等待会话(按用户隔离)"""
+
+    uid: str
+    phone: str
+    future: asyncio.Future = field(default_factory=asyncio.Future)
+
+
+# 全局会话表: uid -> 验证码等待会话。
+# 每个用户(uid)同时只会有一个登录流程, 新流程会挤掉旧流程。
+_CODE_SESSIONS: dict[str, _CodeSession] = {}
 
 # 插件数据目录: <AstrBot>/data/plugin_data/<插件id>/
 # ⚠️ 不能在此处(模块导入时)调用 StarTools.get_data_dir() —— 它靠调用栈回溯
@@ -105,6 +116,61 @@ class Main(Star):
         """用户标识: 用 unified_msg_origin 区分「同一个人的同会话」, 实现单人隔离"""
         return event.unified_msg_origin
 
+    # ---------- 验证码等待(自实现, 替代 session_waiter) ----------
+    @filter.event_message_type(
+        filter.EventMessageType.ALL,
+        priority=100000001,
+    )
+    async def _on_message(self, event: AstrMessageEvent) -> None:
+        """监听所有消息, 喂给验证码等待会话(仅自己发起流程的用户)。
+
+        不使用框架的 session_waiter: 它会注册一个“全局过滤器”, 由内置
+        astrbot star 对每条消息(含机器人自己发的)调 filter() 匹配, 同群消息
+        会被反复命中, 造成验证码错误时重复回复“格式不正确”。
+        """
+        uid = self._uid(event)
+        session = _CODE_SESSIONS.get(uid)
+        if not session or session.future.done():
+            return
+
+        # 只有流程发起者本人后续发的消息才会被处理, 其他用户消息直接忽略
+        msg = event.message_str.strip()
+        if not (msg.isdigit() and len(msg) == 6):
+            await event.send(
+                event.plain_result("🔴 验证码格式不正确，请重新发送 6 位数字验证码"),
+            )
+            return
+        code = msg
+
+        try:
+            auth = await asyncio.to_thread(self.service.login, session.phone, code)
+        except Exception as e:
+            session.future.set_result(
+                ("error", f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login")
+            )
+            return
+
+        # 凭据保存到当前用户 (单人隔离)
+        self.storage.set_auth(
+            session.uid,
+            session.phone,
+            cred=auth["cred"], token=auth["token"],
+            login_token=auth["login_token"], device_token=auth["device_token"],
+            hg_id=auth["hgId"],
+            fingerprint=auth.get("fingerprint"),
+        )
+        self.storage.save_sub(session.uid, event.unified_msg_origin)
+        dev = auth.get("device_name") or auth.get("device_model") or ""
+        dev_txt = f"📱 设备: {dev}\n" if dev else ""
+        session.future.set_result(
+            (
+                "success",
+                f"🟢 登录成功\n用户: {auth.get('nickName', '(未设置昵称)')}（hgId={auth['hgId']}）\n"
+                f"{dev_txt}"
+                "凭据已保存，可随时 /skland checkin 签到",
+            )
+        )
+
     @filter.command_group("skland")
     def skland(self):
         """森空岛登录/签到命令组 /skland（单人指令, 只作用于当前用户）"""
@@ -157,42 +223,18 @@ class Main(Star):
         )
 
         # ② 等待用户下一条消息(验证码), 超时结束流程
-        @session_waiter(timeout=CODE_WAIT_TIMEOUT, record_history_chains=False)
-        async def wait_code(controller: SessionController, ev: AstrMessageEvent):
-            code = ev.message_str.strip()
-            if not (code.isdigit() and len(code) == 6):
-                await ev.send(ev.plain_result("🔴 验证码格式不正确，请重新发送 6 位数字验证码"))
-                return  # 不 stop, 继续等待(剩余时间)
-            try:
-                auth = await asyncio.to_thread(self.service.login, phone, code)
-            except Exception as e:
-                await ev.send(ev.plain_result(
-                    f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login"
-                ))
-                controller.stop()
-                return
-            # 凭据保存到当前用户 (单人隔离)
-            self.storage.set_auth(
-                uid,
-                phone,
-                cred=auth["cred"], token=auth["token"],
-                login_token=auth["login_token"], device_token=auth["device_token"],
-                hg_id=auth["hgId"],
-                fingerprint=auth.get("fingerprint"),
-            )
-            self.storage.save_sub(uid, ev.unified_msg_origin)
-            dev = auth.get("device_name") or auth.get("device_model") or ""
-            dev_txt = f"📱 设备: {dev}\n" if dev else ""
-            await ev.send(ev.plain_result(
-                f"🟢 登录成功\n用户: {auth.get('nickName', '(未设置昵称)')}（hgId={auth['hgId']}）\n"
-                f"{dev_txt}"
-                "凭据已保存，可随时 /skland checkin 签到"
-            ))
-            controller.stop()
-
+        #    用「注册监听器 + future」自实现, 不用框架 session_waiter:
+        #    会话表按 uid 隔离, 只有发起者本人后续消息才会被消费(不再被
+        #    群里其他人的消息/机器人自己的消息反复命中而重复回复)。
+        session = _CodeSession(uid=uid, phone=phone)
+        _CODE_SESSIONS[uid] = session  # 同一 uid 重复发起会挤掉旧流程
         try:
-            await wait_code(event)
-        except TimeoutError:
+            status, text = await asyncio.wait_for(
+                session.future,
+                timeout=CODE_WAIT_TIMEOUT,
+            )
+            yield event.plain_result(text)
+        except asyncio.TimeoutError:
             yield event.plain_result(
                 f"🟡 等待验证码超时（{CODE_WAIT_TIMEOUT} 秒），流程已结束\n"
                 "如仍需登录请重新执行 /skland login <手机号>"
@@ -200,6 +242,8 @@ class Main(Star):
         except Exception as e:
             yield event.plain_result(f"🔴 登录流程出错: {e}")
         finally:
+            if _CODE_SESSIONS.get(uid) is session:
+                _CODE_SESSIONS.pop(uid, None)
             event.stop_event()
 
     @skland.command("logout")
