@@ -44,7 +44,7 @@ CODE_WAIT_TIMEOUT = 60
     "astrbot_plugin_ama_10_entertainment_skland",
     "Restart-Game-Lab",
     "森空岛 (Skland) 验证码登录与多游戏每日签到插件（/skland 命令组）",
-    "v0.3.0",
+    "v0.4.0",
     "https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland",
 )
 class Main(Star):
