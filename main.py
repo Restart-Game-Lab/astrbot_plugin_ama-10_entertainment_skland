@@ -19,7 +19,8 @@
 
 import asyncio
 import re
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from astrbot.api import logger
@@ -40,7 +41,9 @@ class _CodeSession:
 
     uid: str
     phone: str
-    future: asyncio.Future = field(default_factory=asyncio.Future)
+    event: Any = None  # 发起事件的引用(仅超时提示时 send 用)
+    last_remind: float = 0.0  # 上次回复"格式不正确"的时间戳(节流用)
+    timeout_task: asyncio.Task | None = None  # 超时任务(取消用)
 
 
 # 全局会话表: session_key -> 验证码等待会话。
@@ -140,26 +143,39 @@ class Main(Star):
         不使用框架的 session_waiter: 它会注册一个“全局过滤器”, 由内置
         astrbot star 对每条消息(含机器人自己发的)调 filter() 匹配, 同群消息
         会被反复命中, 造成验证码错误时重复回复“格式不正确”。
+
+        命中会话 == 该事件被本插件消费: 必须 call_llm=True 阻断 LLM 链路
+        (数字消息不再触发 AI 回复), 并 stop_event() 终止事件传播。
         """
         session = _CODE_SESSIONS.get(self._session_key(event))
-        if not session or session.future.done():
+        if not session:
             return
+
+        # 命中会话: 拦截该事件(阻断 LLM + 终止传播), 防止数字被 AI 接手
+        event.call_llm = True
 
         # 只有流程发起者本人后续发的消息才会被处理, 其他用户消息直接忽略
         msg = event.message_str.strip()
         if not (msg.isdigit() and len(msg) == 6):
-            await event.send(
-                event.plain_result("🔴 验证码格式不正确，请重新发送 6 位数字验证码"),
-            )
+            # 节流: 5 秒内不重复回复"格式不正确"(防机器人自身消息回传造成刷屏)
+            now = time.time()
+            if now - session.last_remind >= 5:
+                session.last_remind = now
+                await event.send(
+                    event.plain_result("🔴 验证码格式不正确，请重新发送 6 位数字验证码"),
+                )
+            event.stop_event()
             return
         code = msg
 
         try:
             auth = await asyncio.to_thread(self.service.login, session.phone, code)
         except Exception as e:
-            session.future.set_result(
-                ("error", f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login")
-            )
+            await event.send(event.plain_result(
+                f"🔴 登录失败: {e}\n验证码可能错误或已过期，请重新执行 /skland login"
+            ))
+            self._end_session(session)
+            event.stop_event()
             return
 
         # 凭据保存到当前用户 (单人隔离)
@@ -174,14 +190,13 @@ class Main(Star):
         self.storage.save_sub(session.uid, self._uid(event))  # 推送目标按用户 key 存
         dev = auth.get("device_name") or auth.get("device_model") or ""
         dev_txt = f"📱 设备: {dev}\n" if dev else ""
-        session.future.set_result(
-            (
-                "success",
-                f"🟢 登录成功\n用户: {auth.get('nickName', '(未设置昵称)')}（hgId={auth['hgId']}）\n"
-                f"{dev_txt}"
-                "凭据已保存，可随时 /skland checkin 签到",
-            )
-        )
+        await event.send(event.plain_result(
+            f"🟢 登录成功\n用户: {auth.get('nickName', '(未设置昵称)')}（hgId={auth['hgId']}）\n"
+            f"{dev_txt}"
+            "凭据已保存，可随时 /skland checkin 签到"
+        ))
+        self._end_session(session)
+        event.stop_event()  # 验证码已被消费, 事件不再向下传播
 
     @filter.command_group("skland")
     def skland(self):
@@ -234,31 +249,54 @@ class Main(Star):
             f"请 {CODE_WAIT_TIMEOUT} 秒内回复收到的验证码（6 位数字）"
         )
 
-        # ② 等待用户下一条消息(验证码), 超时结束流程
-        #    用「注册监听器 + future」自实现, 不用框架 session_waiter:
-        #    会话表按「平台id+发送者id」隔离(参考 shitu 插件), 只有发起者
-        #    本人后续消息才会被消费, 机器人自己的消息与其统一消息源相同
-        #    也不会命中, 杜绝自我触发循环/群里他人消息误触发。
-        session = _CodeSession(uid=uid, phone=phone)
+        # ② 注册验证码等待会话(参考 shitu 插件的 waiting_sessions):
+        #    命令立即返回, 后续所有消费/回复/超时都在 _on_message 或超时任务中完成。
+        #    会话 key 按「平台id+发送者id」隔离, 只有发起者本人消息才会被消费;
+        #    并在 _on_message 中 call_llm=True + stop_event() 阻断 LLM 与传播。
+        session = _CodeSession(uid=uid, phone=phone, event=event)
         key = self._session_key(event)
-        _CODE_SESSIONS[key] = session  # 同一用户重复发起会挤掉旧流程
+        self._register_session(session, key)
+        # 命令已注册等待会话, 本事件不再向下传播(避免被其他插件/AI 接手)
+        event.stop_event()
+
+    def _register_session(self, session: _CodeSession, key: str):
+        """注册等待会话, 并启动超时任务"""
+        # 同一用户重复发起会挤掉旧流程
+        old = _CODE_SESSIONS.get(key)
+        if old and old.timeout_task and not old.timeout_task.done():
+            old.timeout_task.cancel()
+        _CODE_SESSIONS[key] = session
+        session.timeout_task = asyncio.create_task(
+            self._timeout_check(key, session)
+        )
+
+    def _end_session(self, session: _CodeSession):
+        """结束会话: 取消超时任务 + 从会话表移除"""
+        if session.timeout_task and not session.timeout_task.done():
+            session.timeout_task.cancel()
+        key = next(
+            (k for k, s in _CODE_SESSIONS.items() if s is session),
+            None,
+        )
+        if key:
+            _CODE_SESSIONS.pop(key, None)
+
+    async def _timeout_check(self, key: str, session: _CodeSession):
+        """超时任务: 等待超时后提示并结束会话"""
         try:
-            status, text = await asyncio.wait_for(
-                session.future,
-                timeout=CODE_WAIT_TIMEOUT,
-            )
-            yield event.plain_result(text)
-        except asyncio.TimeoutError:
-            yield event.plain_result(
-                f"🟡 等待验证码超时（{CODE_WAIT_TIMEOUT} 秒），流程已结束\n"
-                "如仍需登录请重新执行 /skland login <手机号>"
-            )
-        except Exception as e:
-            yield event.plain_result(f"🔴 登录流程出错: {e}")
-        finally:
-            if _CODE_SESSIONS.get(key) is session:
-                _CODE_SESSIONS.pop(key, None)
-            event.stop_event()
+            await asyncio.sleep(CODE_WAIT_TIMEOUT)
+            session_now = _CODE_SESSIONS.get(key)
+            if session_now is session:
+                self._end_session(session)
+                try:
+                    await session.event.send(session.event.plain_result(
+                        f"🟡 等待验证码超时（{CODE_WAIT_TIMEOUT} 秒），流程已结束\n"
+                        "如仍需登录请重新执行 /skland login <手机号>"
+                    ))
+                except Exception as e:
+                    logger.warning(f"AMA-10 Skland: 超时提示发送失败: {e}")
+        except asyncio.CancelledError:
+            pass
 
     @skland.command("logout")
     async def skland_logout(self, event: AstrMessageEvent):
