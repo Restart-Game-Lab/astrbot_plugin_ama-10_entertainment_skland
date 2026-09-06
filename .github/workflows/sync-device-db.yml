@@ -1,6 +1,6 @@
 name: Sync device database
 
-on:
+"on":
   schedule:
     # 每月 1 号 02:00 UTC (北京 10:00) 检查一次上游机型库
     - cron: '0 2 1 * *'
@@ -42,14 +42,11 @@ jobs:
           BRANCH="ci/sync-device-db-$(date +%Y%m%d%H%M)"
           git checkout -b "$BRANCH"
           git add data/devices.json
-          git commit -m "chore: 同步上游机型库 devices.json
-
-从 bsthen/device-models (main) 自动同步最新 Google Play 设备名单。
-"
+          git commit -m "chore: 同步上游机型库 devices.json (来自 bsthen/device-models)"
           git push origin "$BRANCH"
 
-          # 若已有同名 PR 则跳过
-          if gh pr list --head "$BRANCH" --json number -q '.[0].number' >/dev/null 2>&1; then
+          # 若已有同名 PR 则跳过 (jq 表达式用双引号防 YAML 单引号歧义)
+          if gh pr list --head "$BRANCH" --json number -q ".[0].number" >/dev/null 2>&1; then
             echo "::notice::上游机型库 PR 已存在"
             exit 0
           fi
@@ -58,12 +55,4 @@ jobs:
             --base main \
             --head "$BRANCH" \
             --title "chore: 同步机型库 devices.json ($(date +%Y-%m-%d))" \
-            --body "## 机型数据库自动同步
-
-每月自动从 [bsthen/device-models](https://github.com/bsthen/device-models)（Apache-2.0，Google Play 支持设备列表）同步最新 \`data/devices.json\`。
-
-- 上游源：\`https://raw.githubusercontent.com/bsthen/device-models/main/devices.json\`
-- 变更内容：Google Play 支持设备列表的增量更新（新增/移除机型）
-- 影响：插件登录时从机型池随机选取设备，同步后机型池更新，无破坏性变更
-
-请 review 后合并。"
+            --body "每月自动从 bsthen/device-models (Apache-2.0, Google Play 支持设备列表) 同步最新 data/devices.json。机型池更新, 无破坏性变更, 请 review 后合并。"
