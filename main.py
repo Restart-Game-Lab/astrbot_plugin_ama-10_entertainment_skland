@@ -43,8 +43,9 @@ class _CodeSession:
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
-# 全局会话表: uid -> 验证码等待会话。
-# 每个用户(uid)同时只会有一个登录流程, 新流程会挤掉旧流程。
+# 全局会话表: session_key -> 验证码等待会话。
+# 每个用户同时只会有一个登录流程, 新流程会挤掉旧流程。
+# session_key = 平台id:发送者id(参考 shitu 插件), 见 _session_key()。
 _CODE_SESSIONS: dict[str, _CodeSession] = {}
 
 # 插件数据目录: <AstrBot>/data/plugin_data/<插件id>/
@@ -117,19 +118,30 @@ class Main(Star):
         return event.unified_msg_origin
 
     # ---------- 验证码等待(自实现, 替代 session_waiter) ----------
+    @staticmethod
+    def _session_key(event: AstrMessageEvent) -> str:
+        """验证码等待会话的隔离 key: 平台id + 发送者id。
+
+        ⚠️ 不能用 unified_msg_origin: 群消息里整个群共享同一个值,
+        群里任何成员的消息(以及机器人自己回复的消息)都会命中会话,
+        造成重复回复甚至“机器人回复 -> 再命中 -> 再回复”的自我触发死循环。
+        用发送者 id 则机器人(自己的 id)与其他人天然隔离。
+        (等待实现参考 astrbot_plugin_shitu 的 waiting_sessions)
+        """
+        return f"{event.get_platform_id()}:{event.get_sender_id()}"
+
     @filter.event_message_type(
         filter.EventMessageType.ALL,
         priority=100000001,
     )
     async def _on_message(self, event: AstrMessageEvent) -> None:
-        """监听所有消息, 喂给验证码等待会话(仅自己发起流程的用户)。
+        """监听所有消息, 喂给验证码等待会话(仅发起者本人)。
 
         不使用框架的 session_waiter: 它会注册一个“全局过滤器”, 由内置
         astrbot star 对每条消息(含机器人自己发的)调 filter() 匹配, 同群消息
         会被反复命中, 造成验证码错误时重复回复“格式不正确”。
         """
-        uid = self._uid(event)
-        session = _CODE_SESSIONS.get(uid)
+        session = _CODE_SESSIONS.get(self._session_key(event))
         if not session or session.future.done():
             return
 
@@ -224,10 +236,12 @@ class Main(Star):
 
         # ② 等待用户下一条消息(验证码), 超时结束流程
         #    用「注册监听器 + future」自实现, 不用框架 session_waiter:
-        #    会话表按 uid 隔离, 只有发起者本人后续消息才会被消费(不再被
-        #    群里其他人的消息/机器人自己的消息反复命中而重复回复)。
+        #    会话表按「平台id+发送者id」隔离(参考 shitu 插件), 只有发起者
+        #    本人后续消息才会被消费, 机器人自己的消息与其统一消息源相同
+        #    也不会命中, 杜绝自我触发循环/群里他人消息误触发。
         session = _CodeSession(uid=uid, phone=phone)
-        _CODE_SESSIONS[uid] = session  # 同一 uid 重复发起会挤掉旧流程
+        key = self._session_key(event)
+        _CODE_SESSIONS[key] = session  # 同一用户重复发起会挤掉旧流程
         try:
             status, text = await asyncio.wait_for(
                 session.future,
@@ -242,8 +256,8 @@ class Main(Star):
         except Exception as e:
             yield event.plain_result(f"🔴 登录流程出错: {e}")
         finally:
-            if _CODE_SESSIONS.get(uid) is session:
-                _CODE_SESSIONS.pop(uid, None)
+            if _CODE_SESSIONS.get(key) is session:
+                _CODE_SESSIONS.pop(key, None)
             event.stop_event()
 
     @skland.command("logout")
