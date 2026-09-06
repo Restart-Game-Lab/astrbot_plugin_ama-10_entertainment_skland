@@ -8,6 +8,4 @@ repo: https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_sk
 license: AGPL-3.0
 support_platforms:
   - aiocqhttp
-  - qqofficial
-  - telethon
 astrbot_version: ">=4.16,<5"
