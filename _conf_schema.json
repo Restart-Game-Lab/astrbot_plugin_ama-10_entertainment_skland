@@ -1,0 +1,38 @@
+{
+  "auto_checkin_enabled": {
+    "description": "是否开启自动签到",
+    "hint": "总开关。关闭后即使设置了签到时间也不会自动签到，只能手动 /skland checkin。",
+    "type": "bool",
+    "default": true
+  },
+  "auto_checkin_time": {
+    "description": "每日自动签到时间",
+    "hint": "每天自动签到的时刻 (24 小时制, HH:MM)。留空或非法则关闭自动签到。",
+    "type": "string",
+    "default": "08:00"
+  },
+  "random_delay_seconds": {
+    "description": "自动签到随机延迟秒数",
+    "hint": "在自动签到时间基础上随机延迟 0~N 秒，避免每日固定时刻触发风控。0 表示不延迟。",
+    "type": "int",
+    "default": 1200
+  },
+  "request_timeout": {
+    "description": "HTTP 请求超时（秒）",
+    "hint": "森空岛 API 请求的超时时间，默认 15 秒。网络较慢时可适当调大。",
+    "type": "int",
+    "default": 15
+  },
+  "forum_checkin_enabled": {
+    "description": "是否启用论坛版块签到",
+    "hint": "勾选后在 /skland checkin 时同步签到森空岛论坛版块（明日方舟/终末地/来自星尘等）。",
+    "type": "bool",
+    "default": true
+  },
+  "game_checkin_enabled": {
+    "description": "是否启用游戏签到",
+    "hint": "勾选后在 /skland checkin 时为绑定游戏（明日方舟/终末地）执行签到。",
+    "type": "bool",
+    "default": true
+  }
+}
