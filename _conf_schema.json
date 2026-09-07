@@ -35,6 +35,12 @@
     "type": "bool",
     "default": true
   },
+  "ua_pool_enabled": {
+    "description": "是否启用真实浏览器 UA 池",
+    "hint": "开启(默认)后业务请求使用随机真实浏览器 UA (browsers.jsonl 加权, SKLand/1.62.0 尾缀); 关闭后完全照搬老插件, 固定使用三星 A55 WebView UA (SKLand/1.52.1), 与 Azincc PR #17 逐字节一致",
+    "type": "bool",
+    "default": true
+  },
   "auto_recall_enabled": {
     "description": "是否自动撤回插件发出的消息",
     "hint": "开启后插件发出的所有消息（登录/签到/状态等）在显示几秒后自动撤回，默认关闭。",

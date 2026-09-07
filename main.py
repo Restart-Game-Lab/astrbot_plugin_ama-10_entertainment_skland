@@ -83,6 +83,7 @@ class Main(Star):
             timeout=float(self.config.get("request_timeout", 15)),
             game_enabled=bool(self.config.get("game_checkin_enabled", True)),
             forum_enabled=bool(self.config.get("forum_checkin_enabled", True)),
+            ua_pool_enabled=bool(self.config.get("ua_pool_enabled", True)),
         )
 
         # 自动签到配置

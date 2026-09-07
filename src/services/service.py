@@ -33,11 +33,14 @@ class SklandService:
     """森空岛业务服务（依赖注入 Storage 与请求超时, 便于测试）"""
 
     def __init__(self, storage: Storage, timeout: float = 15.0,
-                 game_enabled: bool = True, forum_enabled: bool = True):
+                 game_enabled: bool = True, forum_enabled: bool = True,
+                 ua_pool_enabled: bool = True):
         self.storage = storage
         self.timeout = timeout
         self.game_enabled = game_enabled
         self.forum_enabled = forum_enabled
+        # UA 池开关: True=随机浏览器 UA 池; False=固定老插件 USER_AGENT(逐字节一致)
+        self.ua_pool_enabled = ua_pool_enabled
 
     # ---------- 工具 ----------
     @staticmethod
@@ -64,7 +67,7 @@ class SklandService:
         抛出 RuntimeError 表示登录失败。
         v0.5.0: 登录成功后生成设备中心 dId, UA 随机一次。
         """
-        client = SklandClient(timeout=self.timeout)
+        client = SklandClient(timeout=self.timeout, use_ua_pool=self.ua_pool_enabled)
         try:
             token, hg_id, device_token = await client.token_by_phone_code(phone, code)
             try:
@@ -80,7 +83,8 @@ class SklandService:
                 did = ""
             client.did = did or self._fallback_did()
 
-            auth_code = await client.grant(token, device_token)
+            # 对齐 PR #17: grant 无 deviceToken 参数
+            auth_code = await client.grant(token)
             cred, cred_token = await client.generate_cred(auth_code)
 
             # 森空岛真实用户名: 优先 user/me(App 同款, 带签名), 失败回退 basic_info
@@ -110,7 +114,7 @@ class SklandService:
 
     async def send_code(self, phone: str):
         """发送短信验证码"""
-        client = SklandClient(timeout=self.timeout)
+        client = SklandClient(timeout=self.timeout, use_ua_pool=self.ua_pool_enabled)
         try:
             await client.send_phone_code(phone)
         finally:
@@ -126,7 +130,8 @@ class SklandService:
         did, ua = self._ensure_did_and_ua(auth)
         if not did:
             did = self._fallback_did()
-        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None)
+        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None,
+                             use_ua_pool=self.ua_pool_enabled)
         try:
             cred, cred_token = auth["cred"], auth["token"]
             me = await client.user_me(cred, cred_token)
@@ -156,6 +161,12 @@ class SklandService:
 
         v0.5.0: did/ua 从 auth 取 (缺失时生成, 调用方负责写回)。
         """
+        # 完全隔离: 两开关全关 -> 不创建 client、不请求设备中心、零 API 调用
+        if not self.game_enabled and not self.forum_enabled:
+            return {"disabled": True, "game_ok": [], "game_err": [],
+                    "forum_row": "", "forum_err": [],
+                    "did": None, "ua": None}
+
         did, ua = self._ensure_did_and_ua(auth)
         if not did:
             try:
@@ -164,7 +175,8 @@ class SklandService:
                 did = ""
             if not did:
                 did = self._fallback_did()
-        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None)
+        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None,
+                             use_ua_pool=self.ua_pool_enabled)
         cred, cred_token = auth["cred"], auth["token"]
 
         groups = {
@@ -248,6 +260,10 @@ class SklandService:
                 lines.append(f"🔴 {self._mask_phone(p)} 签到失败: {e}")
                 continue
 
+            # 双关时无任何网络请求: 跳过写回与输出
+            if g.get("disabled"):
+                continue
+
             # v0.5.0: 无 did/ua 的存量账号写回 (之后恒定)
             if not a.get("did") or not a.get("ua_used"):
                 a["did"] = g.get("did", "")
@@ -264,30 +280,35 @@ class SklandService:
                     ua_used=a.get("ua_used", ""),
                 )
 
-            # 分组输出: [游戏签到] / [论坛签到] 段落 + 失败说明
-            game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
-            game_rows += g.get("game_err", [])
-            game_ok_n = len(g.get("game_ok", []))
-            game_err_n = len(g.get("game_err", []))
-            forum_balls = (g.get("forum_row") or "").split()
-            forum_ok_n = forum_balls.count("🟢")
-            forum_err_n = len(g.get("forum_err", []))
-            fail_n = game_err_n + forum_err_n
+            # 分组输出: 仅显示启用的模块, 关闭的模块整个段落不输出
+            sections = []
+            ok_n = fail_n = 0
+
+            if self.game_enabled:
+                game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
+                game_rows += g.get("game_err", [])
+                sections.append("[游戏签到]:")
+                sections.extend(game_rows)
+                ok_n += len(g.get("game_ok", []))
+                fail_n += len(g.get("game_err", []))
+
+            if self.forum_enabled:
+                forum_balls = (g.get("forum_row") or "").split()
+                sections.append("[论坛签到]:")
+                sections.append(g["forum_row"])
+                ok_n += forum_balls.count("🟢")
+                fail_n += len(g.get("forum_err", []))
+                sections.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
 
             if fail_n == 0:
                 head = "🟢 签到完成"
-            elif (game_ok_n + forum_ok_n) == 0:
+            elif ok_n == 0:
                 head = "🔴 签到失败"
             else:
                 head = "🟡 签到完成异常"
 
             lines.append(head)
-            lines.append(f"[游戏签到]:")
-            lines.extend(game_rows)
-            if g.get("forum_row"):
-                lines.append(f"[论坛签到]:")
-                lines.append(g["forum_row"])
-            lines.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
+            lines.extend(sections)
 
         return "\n".join(lines)
 

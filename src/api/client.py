@@ -9,9 +9,12 @@
   - httpx.AsyncClient 异步 + _request 统一重试 (3 次, 4xx 不重试)
   - 错误分类: 「用户未登录」-> CredExpiredError (上层提示重新登录)
 
+对齐 Azincc PR #17 (未合并 v2.0.0 登录链路, 2026-09-07):
+  - 账号服登录/授权请求头统一为登录专用头 (仅 UA+Accept-Encoding+Connection+dId),
+    不携带 App 设备头 (X-DeviceId/X-DeviceModel 等) —— 防「设备信息无效」风控
+  - token_by_phone_code body 不带 appCode; grant body 不带 deviceToken
+
 保留 (本插件独有, 经实测可用):
-  - 账号服 (as.hypergryph.com) 接口保留 App 设备头 (X-DeviceId/X-DeviceModel 等)
-    —— 手机号验证码登录链路 (send_phone_code/token_by_phone_code) 依赖它
   - 论坛版块签到: /api/v1/score/ischeckin + /api/v1/score/checkin (切新签名)
   - 「已签到/重复签到」判定 (HTTP 403 + code=10001 不算失败)
 """
@@ -31,11 +34,7 @@ AS_HOST = "https://as.hypergryph.com"
 ZONAI_HOST = "https://zonai.skland.com"
 
 # 客户端标识（账号服 App 参数, 手机号登录链路保留）
-APP_CODE = "4ca99fa6b56cc2ba"  # 森空岛 appCode
-DEVICE_TYPE = "1"
-VNAME = "1.62.0"   # App 版 vName (账号服)
-PLATFORM = "1"     # App 版 platform (账号服)
-VCODE = "106200040"
+APP_CODE = "4ca99fa6b56cc2ba"  # 森空岛 appCode（grant 用, 对齐 PR #17）
 
 # Web 版签名参数 (森空岛业务接口, Azincc 方案)
 WEB_PLATFORM = "3"    # platform=3 (Web)
@@ -43,6 +42,13 @@ WEB_VNAME = "1.0.0"   # vName (Web 版)
 
 # 请求头 UA (登录链路使用, Azincc 风格)
 LOGIN_USER_AGENT = "Skland/1.0.1 (com.hypergryph.skland; build:100001014; Android 31; ) Okhttp/4.11.0"
+
+# Web 版业务 UA (PR #17 固定值): ua_pool_enabled=False 时全盘照搬老插件
+USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 12; SM-A5560 Build/V417IR; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+    "Chrome/101.0.4951.61 Safari/537.36; SKLand/1.52.1"
+)
 
 # Android 版本 -> os 内部版本号 (账号服 App 版 os 头)
 _OS_INT_MAP = {13: 33, 14: 34, 15: 35, 16: 36}
@@ -99,10 +105,15 @@ class SklandClient:
     """
 
     def __init__(self, timeout: float = 15.0, did: str | None = None,
-                 ua: str | None = None):
+                 ua: str | None = None, use_ua_pool: bool = True):
         self.timeout = timeout
         self.did = did or ""
-        self.ua = ua or random_user_agent()
+        # 业务 UA: 池开关开启(默认) -> UA 池随机; 关闭 -> 固定老插件 USER_AGENT (逐字节一致)
+        self.use_ua_pool = use_ua_pool
+        if not use_ua_pool:
+            self.ua = USER_AGENT
+        else:
+            self.ua = ua or random_user_agent()
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -158,17 +169,17 @@ class SklandClient:
                     await asyncio.sleep(1)
         raise last_error
 
-    # ---------- 账号服 (App 参数, 手机号登录链路保留) ----------
-    def _as_headers(self) -> dict:
-        """账号服请求头 (App 设备参数, 与 v0.4.0 一致)"""
-        did_raw = self.did.replace("B", "") if self.did else ""
+    # ---------- 账号服 (登录专用头, 对齐 Azincc PR #17 _get_login_headers) ----------
+    def _login_headers(self) -> dict:
+        """账号服登录/授权请求头 (与 Azincc PR #17 完全一致, 仅 4 项)。
+
+        不携带任何 X-Device* App 设备头——森空岛登录鉴权接口要求客户端身份
+        与 App 登录 UA 匹配, 多余设备头会导致「设备信息无效」(code=10001)。
+        """
         return {
-            "X-DeviceId": (did_raw[:32].ljust(32, "0")) or "0" * 32,
-            "X-DeviceModel": "SM-A5560",
-            "X-DeviceType": DEVICE_TYPE,
-            "X-OSVer": "12",
             "User-Agent": LOGIN_USER_AGENT,
-            "Content-Type": "application/json; charset=utf-8",
+            "Accept-Encoding": "gzip",
+            "Connection": "close",
             "dId": self.did,
         }
 
@@ -203,7 +214,7 @@ class SklandClient:
         """① 发送短信验证码"""
         url = f"{AS_HOST}/general/v1/send_phone_code"
         resp = await self._request(
-            "POST", url, headers=self._as_headers(),
+            "POST", url, headers=self._login_headers(),
             json_data={"phone": phone, "type": 2},
         )
         data = self._check(resp, "send_phone_code")
@@ -212,11 +223,11 @@ class SklandClient:
         return True
 
     async def token_by_phone_code(self, phone: str, code: str):
-        """② 验证码换登录 token"""
+        """② 验证码换登录 token (body 对齐 PR #17: 仅 phone+code, 无 appCode)"""
         url = f"{AS_HOST}/user/auth/v2/token_by_phone_code"
         resp = await self._request(
-            "POST", url, headers=self._as_headers(),
-            json_data={"phone": phone, "code": code, "appCode": APP_CODE},
+            "POST", url, headers=self._login_headers(),
+            json_data={"phone": phone, "code": code},
         )
         data = self._check(resp, "token_by_phone_code")
         if data.get("status") != 0:
@@ -224,24 +235,24 @@ class SklandClient:
                 f"[token_by_phone_code] 失败: {data.get('msg')} (status={data.get('status')})"
             )
         t = data["data"]
-        return t["token"], t["hgId"], t["deviceToken"]
+        # hgId/deviceToken 仅为展示兼容读取, 不参与任何请求
+        return t["token"], t.get("hgId", ""), t.get("deviceToken", "")
 
     async def basic_info(self, token: str) -> dict:
         """③ 拉取用户信息 (实名/防沉迷判定, 可选)"""
         url = f"{AS_HOST}/user/info/v1/basic"
         resp = await self._request(
-            "GET", url, headers=self._as_headers(),
+            "GET", url, headers=self._login_headers(),
         )
         data = self._check(resp, "basic")
         return data.get("data", {})
 
-    async def grant(self, token: str, device_token: str):
-        """④ 登录 token 换授权码 (账号服, 保留现有实现)"""
+    async def grant(self, token: str):
+        """④ 登录 token 换授权码 (body 对齐 PR #17: 无 deviceToken)"""
         url = f"{AS_HOST}/user/oauth2/v2/grant"
         resp = await self._request(
-            "POST", url, headers=self._as_headers(),
-            json_data={"token": token, "appCode": APP_CODE, "type": 0,
-                       "deviceToken": device_token},
+            "POST", url, headers=self._login_headers(),
+            json_data={"appCode": APP_CODE, "token": token, "type": 0},
         )
         data = self._check(resp, "grant")
         if data.get("status") != 0:
@@ -254,7 +265,7 @@ class SklandClient:
         url = f"{ZONAI_HOST}/web/v1/user/auth/generate_cred_by_code"
         resp = await self._request(
             "POST", url,
-            headers={"User-Agent": LOGIN_USER_AGENT, "dId": self.did},
+            headers=self._login_headers(),  # 对齐 PR #17: 登录专用头
             json_data={"code": auth_code, "kind": 1},
         )
         data = self._check(resp, "generate_cred_by_code")
@@ -298,6 +309,10 @@ class SklandClient:
         bindings = []
         for item in data.get("data", {}).get("list", []):
             app_code = item.get("appCode")
+            # 对齐 PR #17: 只处理方舟/终末地, 其他游戏(来自星尘/泡姆泡姆等)
+            # 跳过 —— 避免对无签到端点的游戏发起无效请求(失败噪音)
+            if app_code not in ("arknights", "endfield"):
+                continue
             for b in item.get("bindingList", []):
                 nick = b.get("nickName") or (b.get("defaultRole") or {}).get("nickname") or "(未设置)"
                 # roles: Azincc 逐角色签到用; defaultRole: 老版单角色

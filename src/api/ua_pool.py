@@ -92,7 +92,7 @@ def _load_pool() -> list[dict]:
 # 兜底 UA 池(文件缺失或过滤后为空时使用, 与 Azincc 原版一致)
 FALLBACK_USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 12; SM-A5560 Build/V417IR; wv) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Version/4.0 Chrome/101.0.4951.61 Safari/537.36 SKLand/1.52.1",
+    "(KHTML, like Gecko) Version/4.0 Chrome/101.0.4951.61 Safari/537.36 SKLand/1.62.0",
 ]
 
 # 惰性加载缓存
@@ -114,6 +114,7 @@ def random_user_agent() -> str:
     chosen = random.choices(_pool_cache, weights=weights, k=1)[0]
     ua = chosen.get("useragent", "")
     # 末尾补 SKLand 客户端标识(与 Azincc 一致, 服务端可识别为森空岛客户端)
+    # v1.62.0 与账号服 App vName 对齐(原 1.52.1 是 PR #17 的旧常量)
     if "SKLand" not in ua:
-        ua = f"{ua} SKLand/1.52.1"
+        ua = f"{ua} SKLand/1.62.0"
     return ua
