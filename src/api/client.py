@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import time
+from urllib.parse import urlencode
 
 import httpx
 
@@ -391,10 +392,13 @@ class SklandClient:
 
     # ---------- 业务: 游戏签到 ----------
     async def sign_attendance(self, cred: str, token: str, game_id: int,
-                              binding: dict, uid: str = None) -> bool:
+                              binding: dict, uid: str = None) -> dict:
         """签到按游戏区分端点与参数 (v0.5.0 Azincc 方案)。
 
-        返回 True=签到成功; False=已签到(不算失败); 抛异常=失败。
+        返回 {"ok": bool, "awards": str}:
+          - ok=True:   本次签到成功, awards 为签到响应奖励文本
+          - ok=False:  今日已签到(不算失败), awards 为查询到的奖励文本(可能为空)
+          - 抛异常:    真实失败
         - arknights(1):  POST /api/v1/game/attendance  body={gameId, uid}
         - endfield(3):   POST /web/v1/game/endfield/attendance
                           头 sk-game-role: 3_{roleId}_{serverId}, 逐角色签到
@@ -412,24 +416,63 @@ class SklandClient:
         if resp.get("code") == 10001:
             msg = resp.get("message", "")
             if is_duplicate_message(msg):
-                return False
+                # 已签到: 不重复签到, 但查询今日奖励展示 (对齐 PR #17)
+                try:
+                    awards = await self.get_attendance_awards(cred, token, game_id, uid)
+                except Exception:
+                    awards = ""
+                return {"ok": False, "awards": awards}
             raise RuntimeError(f"[game/attendance] HTTP 403: {msg}")
         if resp.get("code") != 0:
             msg = resp.get("message", "")
             if _is_expired_message(msg):
                 raise CredExpiredError("用户登录已过期，请重新登录")
             if is_duplicate_message(msg):
-                return False
+                try:
+                    awards = await self.get_attendance_awards(cred, token, game_id, uid)
+                except Exception:
+                    awards = ""
+                return {"ok": False, "awards": awards}
             raise RuntimeError(f"[game/attendance] 失败: {msg} (code={resp.get('code')})")
-        return True
+        return {"ok": True, "awards": self._extract_awards(resp.get("data", {}))}
 
-    async def _sign_endfield(self, cred: str, token: str, binding: dict) -> bool:
+    async def get_attendance_awards(self, cred: str, token: str, game_id: int,
+                                    uid: str) -> str:
+        """查询方舟今日签到奖励 (GET, 带签名; 对齐 Azincc PR #17)。
+
+        仅用于「已签到」后的展示, 不会触发重复签到。
+        返回奖励文本 (如 "合成玉x100, 龙门币x500"), 失败返回空串。
+        """
+        path = "/api/v1/game/attendance"
+        query = urlencode({"gameId": game_id, "uid": uid})
+        url = f"{ZONAI_HOST}{path}?{query}"
+        headers = self._web_headers(token=token, cred=cred, path=path, body_or_query=query)
+        resp = await self._request("GET", url, headers=headers)
+        if resp.get("code") != 0:
+            # 回退: 无签名重试 (PR #17 fallback: 仅基础头 + cred)
+            fallback = {
+                "User-Agent": self.ua,
+                "Accept-Encoding": "gzip",
+                "Connection": "close",
+                "X-Requested-With": "com.hypergryph.skland",
+                "dId": self.did,
+                "cred": cred,
+            }
+            resp = await self._request("GET", url, headers=fallback)
+        if resp.get("code") != 0:
+            return ""
+        return self._extract_awards(resp.get("data", {}))
+
+    async def _sign_endfield(self, cred: str, token: str, binding: dict) -> dict:
         """终末地签到 (Azincc 方案): /web/v1/game/endfield/attendance
 
         逐角色签到 (roles 列表), 头 sk-game-role: 3_{roleId}_{serverId},
         referer/origin: https://game.skland.com/; 签名 body 为空字符串。
-        返回 True=全部角色签到成功/已签到; False=有角色未签到(不算失败);
-        抛异常=真实失败。
+        返回 {"ok": bool, "awards": str}:
+          - ok=True:   全部角色签到成功/已签到
+          - ok=False:  有角色未签到(不算失败)
+          - 抛异常:    真实失败
+        awards 汇总所有角色的签到奖励 (awardIds + resourceInfoMap)。
         """
         roles = binding.get("roles") or []
         if not roles:
@@ -438,6 +481,7 @@ class SklandClient:
         path = "/web/v1/game/endfield/attendance"
         url = f"{ZONAI_HOST}{path}"
         results = []
+        all_awards: list[str] = []
         for role in roles:
             role_id = role.get("roleId", "")
             server_id = role.get("serverId", "")
@@ -463,12 +507,74 @@ class SklandClient:
                     raise CredExpiredError("用户登录已过期，请重新登录")
                 raise RuntimeError(f"[endfield] 失败: {msg} (code={resp.get('code')})")
             results.append(True)
-        return all(results)
+            aw = self._extract_awards(resp.get("data", {}))
+            if aw:
+                all_awards.append(aw)
+        # 去重汇总 (多角色奖励可能重复)
+        seen, merged = set(), []
+        for aw in all_awards:
+            if aw not in seen:
+                seen.add(aw)
+                merged.append(aw)
+        return {"ok": all(results), "awards": ", ".join(merged)}
 
     # ---------- 工具 ----------
     @staticmethod
+    def _format_award_item(award: dict, resource_map: dict | None = None) -> str:
+        """单个奖励条目 -> "名称x数量" (兼容 resource 内嵌 / resourceId 映射)"""
+        if not isinstance(award, dict):
+            return ""
+        resource = award.get("resource") or {}
+        name = resource.get("name") or award.get("name") or award.get("itemName") or ""
+        if not name:
+            resource_id = str(award.get("id") or award.get("resourceId") or "")
+            info = (resource_map or {}).get(resource_id) or {}
+            name = info.get("name") or ""
+        if not name:
+            return ""
+        count = award.get("count")
+        if count is None:
+            count = resource.get("count") or 1
+        return f"{name}x{count}"
+
+    @staticmethod
+    def _extract_awards(data: dict) -> str:
+        """从响应 data 提取奖励文本 (兼容多种结构)。
+
+        支持: awards/todayAwards/currentAwards/current/rewardList/rewards/items/list
+        (Azincc PR #17), 以及终末地的 awardIds + resourceInfoMap。
+        返回如 "合成玉x100, 龙门币x500"; 无奖励返回空串。
+        """
+        if not isinstance(data, dict):
+            return ""
+        resource_map = data.get("resourceInfoMap") or {}
+        awards: list[str] = []
+        for key in ("awards", "todayAwards", "currentAwards", "current",
+                    "rewardList", "rewards", "items", "list"):
+            items = data.get(key)
+            if not isinstance(items, list):
+                continue
+            for a in items:
+                t = SklandClient._format_award_item(a, resource_map)
+                if t:
+                    awards.append(t)
+            if awards:
+                break
+        if not awards:
+            # 终末地: awardIds [{id}] + resourceInfoMap {id: {name, count}}
+            for a in data.get("awardIds") or []:
+                if not isinstance(a, dict):
+                    continue
+                aid = a.get("id")
+                info = resource_map.get(str(aid)) or resource_map.get(aid) or {}
+                name = info.get("name") or ""
+                if name:
+                    awards.append(f"{name}x{info.get('count', 1)}")
+        return ", ".join(awards)
+
+    @staticmethod
     def get_awards_text(resp: dict) -> str:
-        """从签到响应 data.awards 汇总奖励文本"""
+        """从签到响应 data.awards 汇总奖励文本 (兼容保留)"""
         awards = []
         for a in (resp.get("data") or {}).get("awards", []):
             name = a.get("resource", {}).get("name", "未知")

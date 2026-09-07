@@ -156,7 +156,7 @@ class SklandService:
         """对单个账号执行签到，返回分组行列表 + 论坛球串。
 
         返回结构:
-          game_ok / game_err     : 游戏签到行(直接带球符)
+          game_ok / game_err     : 游戏签到行 "球 | 游戏名 | 奖励"
           forum_row / forum_msg  : 论坛一行球串 / 附加说明(失败原因等)
         已签到视为成功(不算失败)。
 
@@ -201,12 +201,15 @@ class SklandService:
             for b in bindings:
                 name = f"{b.get('gameName')} | {b.get('nickName')}"
                 try:
-                    await client.sign_attendance(cred, cred_token, b["gameId"], b, b.get("uid"))
-                    groups["game_ok"].append(f"🟢 {name}")
+                    r = await client.sign_attendance(cred, cred_token, b["gameId"], b, b.get("uid"))
+                    awards = r.get("awards") or "无奖励"
+                    # 🟢=本次签到成功; 🟡=今日已签到(未重复签到, 查询奖励展示)
+                    ball = "🟢" if r.get("ok") else "🟡"
+                    groups["game_ok"].append(f"{ball} | {name} | {awards}")
                 except CredExpiredError as e:
-                    groups["game_err"].append(f"🔴 {name} {e}")
+                    groups["game_err"].append(f"🔴 | {name} | {e}")
                 except Exception as e:
-                    groups["game_err"].append(f"🔴 {name} {e}")
+                    groups["game_err"].append(f"🔴 | {name} | {e}")
 
         # ---- 论坛签到（受 forum_enabled 开关控制）----
         if self.forum_enabled:
