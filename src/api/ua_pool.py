@@ -25,7 +25,8 @@ import random
 from pathlib import Path
 
 # 数据文件位于插件根目录 data/browsers.jsonl
-_UA_JSON = Path(__file__).resolve().parent.parent / "data" / "browsers.jsonl"
+# ⚠️ __file__ = src/api/ua_pool.py, 插件根目录 = parent.parent.parent
+_UA_JSON = Path(__file__).resolve().parent.parent.parent / "data" / "browsers.jsonl"
 
 # 浏览器白名单(仅 Android 系; 桌面系 UA 与森空岛 App 行为不符, 弃用)
 BROWSER_WHITELIST = (
@@ -110,8 +111,20 @@ def random_user_agent() -> str:
     if not _pool_cache:
         return FALLBACK_USER_AGENTS[0]
 
-    weights = [max(float(e.get("percent") or 0.0), 0.01) for e in _pool_cache]
-    chosen = random.choices(_pool_cache, weights=weights, k=1)[0]
+    # ⚠️ fake-useragent 数据按 (UA, os, device) 变体重复, 同一 UA 出现多条,
+    #    若按原始 percent 加权会导致同一 UA 概率被重复条目叠加(如 Chrome/135
+    #    占 86%), 形成「万人同指纹」。这里按 useragent 字符串去重后均匀随机,
+    #    保证不同浏览器/版本/机型轮换, 降低被风控判定为批量流量风险。
+    unique = {}
+    for e in _pool_cache:
+        ua = e.get("useragent", "")
+        if ua and ua not in unique:
+            unique[ua] = e
+    pool = list(unique.values())
+    if not pool:
+        return FALLBACK_USER_AGENTS[0]
+
+    chosen = random.choice(pool)
     ua = chosen.get("useragent", "")
     # 末尾补 SKLand 客户端标识(与 Azincc 一致, 服务端可识别为森空岛客户端)
     # v1.62.0 与账号服 App vName 对齐(原 1.52.1 是 PR #17 的旧常量)
