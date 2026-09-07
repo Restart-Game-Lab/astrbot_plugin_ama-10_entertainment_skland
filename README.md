@@ -54,6 +54,7 @@ https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland
 | --- | --- |
 | `/skland login <手机号>` | 发送短信验证码，并在 60 秒内等待用户回复验证码完成登录（超时自动结束流程）。验证码格式不合法则静默忽略（不提示），合法则自动登录并展示登录用户 |
 | `/skland checkin` | 用缓存凭据为当前用户签到所有绑定游戏 + 论坛版块（显示游戏/论坛结果分组） |
+| `/skland checkin_all` | 管理员：为全部已登录用户批量签到，展示每账号状态与汇总（需管理员权限） |
 | `/skland status` | 查看当前用户绑定用户与自动签到/游戏/论坛配置 |
 | `/skland logout` | 清除当前用户的全部凭据（并释放手机号占用） |
 

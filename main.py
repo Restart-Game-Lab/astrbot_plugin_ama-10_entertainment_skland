@@ -7,6 +7,7 @@
   /skland status           查看当前用户凭据/自动签到配置
   /skland status_all       管理员查看全部用户登录状态总览
   /skland checkin          手动签到一次(当前用户全部游戏+论坛)
+  /skland checkin_all      管理员为全部已登录用户批量签到(展示汇总)
 
 自动签到:
   配置 auto_checkin_time (cron 表达式, 默认 "0 6 * * *" = 每天 6:00) 定时自动签到;
@@ -505,6 +506,23 @@ class Main(Star):
         lines.append("")
         lines.append(f"[汇总]: 🟢 {ok_n} · 🔴 {err_n} · 🟡 {warn_n}")
         await self._send_and_recall(event, "\n".join(lines), scope="status")
+        self._stop_and_block_llm(event)
+
+    @permission_type(PermissionType.ADMIN)
+    @skland.command("checkin_all")
+    async def skland_checkin_all(self, event: AstrMessageEvent):
+        """/skland checkin_all: 管理员为全部已登录用户批量签到并展示汇总
+
+        与个人 /skland checkin 不同: 遍历所有已登录账号逐个签到,
+        每账号一行主状态(球 + 森空岛昵称 + 掩码手机号), 失败/异常展开细节,
+        底部三色汇总计数, 风格与 /skland status_all 一致。
+        非管理员无权调用(permission_type 拦截)。
+        """
+        await self._send_and_recall(
+            event,
+            await self.service.checkin_all_admin(),
+            scope="checkin",
+        )
         self._stop_and_block_llm(event)
 
     @skland.command("checkin")

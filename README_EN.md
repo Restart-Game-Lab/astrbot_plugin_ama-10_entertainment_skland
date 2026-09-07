@@ -53,6 +53,7 @@ Command group `/skland`:
 | --- | --- |
 | `/skland login <phone>` | Send an SMS verification code, then wait for the user to reply with the code within 60s to finish login (times out automatically). Invalid codes prompt a resend |
 | `/skland checkin` | Sign in for all bound games + forum sections for the current user using cached credentials (shows the login device at top) |
+| `/skland checkin_all` | Admin: sign in for ALL logged-in users and show per-account status + summary (requires admin permission) |
 | `/skland status` | Show the current user's bound phone, login device and auto sign-in / game / forum config |
 | `/skland logout` | Remove all credentials of the current user (and release the phone number) |
 

@@ -3,7 +3,8 @@
 封装与 AstrBot 无关的纯业务逻辑:
   - login(phone, code): 验证码完成登录, 返回凭据字典 (设备中心 dId + UA)
   - do_checkin(phone, auth): 对单个账号签到所有绑定游戏
-  - checkin_all(uid): 签到指定(或全部)账号, 返回展示文本
+  - checkin_all(uid): 签到指定用户全部账号, 返回展示文本
+  - checkin_all_admin(): 管理员批量签到全部账号, 返回汇总文本
   - 自动签到调度(auto_checkin_loop): 每日定时 + 随机延迟
 
 v0.5.0 变更:
@@ -238,6 +239,51 @@ class SklandService:
         await client.close()
         return groups
 
+    # ---------- 展示/写回辅助(单人版与管理版共用) ----------
+    def _format_groups(self, g: dict) -> tuple[list[str], int, int]:
+        """把 do_checkin 的分组结果转成展示行。
+
+        仅显示启用的模块, 关闭的模块整个段落不输出。
+        返回 (sections, ok_n, fail_n): 展示行列表 / 成功数 / 失败数。
+        """
+        sections: list[str] = []
+        ok_n = fail_n = 0
+
+        if self.game_enabled:
+            game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
+            game_rows += g.get("game_err", [])
+            sections.append("[游戏签到]:")
+            sections.extend(game_rows)
+            ok_n += len(g.get("game_ok", []))
+            fail_n += len(g.get("game_err", []))
+
+        if self.forum_enabled:
+            forum_balls = (g.get("forum_row") or "").split()
+            sections.append("[论坛签到]:")
+            sections.append(g["forum_row"])
+            ok_n += forum_balls.count("🟢")
+            fail_n += len(g.get("forum_err", []))
+            sections.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
+
+        return sections, ok_n, fail_n
+
+    def _backfill_did_ua(self, uid: str, phone: str, auth: dict, g: dict):
+        """v0.5.0: 无 did/ua 的存量账号写回 (之后恒定)。"""
+        if not auth.get("did") or not auth.get("ua_used"):
+            auth["did"] = g.get("did", "")
+            auth["ua_used"] = g.get("ua", "")
+            self.storage.set_auth(
+                uid, phone,
+                cred=auth["cred"], token=auth["token"],
+                login_token=auth.get("login_token", ""),
+                device_token=auth.get("device_token", ""),
+                hg_id=auth.get("hgId", ""),
+                fingerprint=auth.get("fingerprint") or {},
+                nick_name=auth.get("nickName", ""),
+                did=auth.get("did", ""),
+                ua_used=auth.get("ua_used", ""),
+            )
+
     async def checkin_all(self, uid: str) -> str:
         """签到指定用户(单人)的全部账号，返回给用户/日志的摘要文本。
 
@@ -265,40 +311,10 @@ class SklandService:
                 continue
 
             # v0.5.0: 无 did/ua 的存量账号写回 (之后恒定)
-            if not a.get("did") or not a.get("ua_used"):
-                a["did"] = g.get("did", "")
-                a["ua_used"] = g.get("ua", "")
-                self.storage.set_auth(
-                    uid, p,
-                    cred=a["cred"], token=a["token"],
-                    login_token=a.get("login_token", ""),
-                    device_token=a.get("device_token", ""),
-                    hg_id=a.get("hgId", ""),
-                    fingerprint=a.get("fingerprint") or {},
-                    nick_name=a.get("nickName", ""),
-                    did=a.get("did", ""),
-                    ua_used=a.get("ua_used", ""),
-                )
+            self._backfill_did_ua(uid, p, a, g)
 
             # 分组输出: 仅显示启用的模块, 关闭的模块整个段落不输出
-            sections = []
-            ok_n = fail_n = 0
-
-            if self.game_enabled:
-                game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
-                game_rows += g.get("game_err", [])
-                sections.append("[游戏签到]:")
-                sections.extend(game_rows)
-                ok_n += len(g.get("game_ok", []))
-                fail_n += len(g.get("game_err", []))
-
-            if self.forum_enabled:
-                forum_balls = (g.get("forum_row") or "").split()
-                sections.append("[论坛签到]:")
-                sections.append(g["forum_row"])
-                ok_n += forum_balls.count("🟢")
-                fail_n += len(g.get("forum_err", []))
-                sections.extend(f"   🔴 {err}" for err in g.get("forum_err", []))
+            sections, ok_n, fail_n = self._format_groups(g)
 
             if fail_n == 0:
                 head = "🟢 签到完成"
@@ -310,6 +326,66 @@ class SklandService:
             lines.append(head)
             lines.extend(sections)
 
+        return "\n".join(lines)
+
+    async def checkin_all_admin(self) -> str:
+        """管理员全量签到: 遍历所有已登录账号, 逐个签到并返回汇总文本。
+
+        与 checkin_all_users(静默)不同: 返回给管理员看的完整汇总,
+        每账号一行主状态(球 + 昵称 + 掩码手机号), 失败/异常展开细节,
+        底部三色汇总计数, 风格与 status_all 一致。
+        """
+        all_auth = self.storage.load_auth()
+        if not all_auth:
+            return "全量签到完成（共 0 个账号）\n\n🟡 暂无用户登录"
+
+        entries = [
+            (uid, phone, a)
+            for uid, auths in all_auth.items()
+            for phone, a in auths.items()
+        ]
+
+        ok_n = err_n = warn_n = 0
+        lines = [f"全量签到完成（共 {len(entries)} 个账号）", ""]
+        for uid, phone, a in entries:
+            nick = a.get("nickName") or "(未设置昵称)"
+            phone_m = self._mask_phone(phone)
+            try:
+                g = await self.do_checkin(phone, a)
+            except CredExpiredError:
+                warn_n += 1
+                lines.append(f"🟡 {nick} | {phone_m}")
+                lines.append(f"   ⚠️ 凭据失效，请重新登录（/skland login {phone_m}）")
+                continue
+            except Exception as e:
+                err_n += 1
+                lines.append(f"🔴 {nick} | {phone_m}")
+                lines.append(f"   ⚠️ 签到失败: {e}")
+                continue
+
+            # 双关时无任何网络请求: 跳过输出与计数
+            if g.get("disabled"):
+                continue
+
+            # v0.5.0: 无 did/ua 的存量账号写回 (之后恒定)
+            self._backfill_did_ua(uid, phone, a, g)
+
+            sections, g_ok, g_fail = self._format_groups(g)
+            if g_fail == 0:
+                mark = "🟢"
+                ok_n += 1
+            elif g_ok == 0:
+                mark = "🔴"
+                err_n += 1
+            else:
+                mark = "🟡"
+                warn_n += 1
+
+            lines.append(f"{mark} {nick} | {phone_m}")
+            lines.extend(f"   {s}" for s in sections)
+
+        lines.append("")
+        lines.append(f"[汇总]: 🟢 {ok_n} · 🔴 {err_n} · 🟡 {warn_n}")
         return "\n".join(lines)
 
     async def checkin_all_users(self) -> None:
