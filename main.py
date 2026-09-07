@@ -416,14 +416,29 @@ class Main(Star):
 
     @skland.command("status")
     async def skland_status(self, event: AstrMessageEvent):
-        """/skland status: 查看当前用户状态"""
+        """/skland status: 查看当前用户状态（实际请求 user/me 验证登录态 + 获取最新昵称）"""
         auth = self.storage.load_auth(self._uid(event))
 
         if auth:
             phone, a = next(iter(auth.items()))
             nick = a.get("nickName") or "(未设置昵称)"
             lines = [f"🟢 已绑定 {self._mask_phone(phone)}"]
-            lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
+
+            # 实际请求端点验证登录态 + 刷新昵称
+            try:
+                result = await self.service.check_auth(a)
+                if result.get("ok"):
+                    nick = result.get("nickname") or nick
+                    lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
+                    lines.append(f"[登录态]: 🟢 有效")
+                else:
+                    lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
+                    lines.append(f"[登录态]: 🔴 已失效（{result.get('error', '未知错误')}）")
+                    lines.append("  请 /skland logout 后重新登录")
+            except Exception as e:
+                # 请求本身异常不阻塞展示
+                lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
+                lines.append(f"[登录态]: ⚠️ 检查失败（{e}）")
         else:
             lines = ["🟡 未绑定手机号"]
 

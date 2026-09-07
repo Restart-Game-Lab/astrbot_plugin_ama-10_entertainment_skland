@@ -116,6 +116,30 @@ class SklandService:
         finally:
             await client.close()
 
+    async def check_auth(self, auth: dict) -> dict:
+        """验证登录态是否有效 (实际请求 user/me 端点, 拉取用户名)。
+
+        返回: {"ok": bool, "nickname": str, "error": str}
+          - ok=True:  登录态有效, nickname 为最新森空岛用户名
+          - ok=False: 凭据失效 (CredExpiredError) 或请求失败
+        """
+        did, ua = self._ensure_did_and_ua(auth)
+        if not did:
+            did = self._fallback_did()
+        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None)
+        try:
+            cred, cred_token = auth["cred"], auth["token"]
+            me = await client.user_me(cred, cred_token)
+            nickname = (me.get("user") or {}).get("nickname") or ""
+            return {"ok": True, "nickname": nickname, "error": ""}
+        except CredExpiredError as e:
+            return {"ok": False, "nickname": "", "error": str(e)}
+        except Exception as e:
+            # 网络/响应异常不等同于凭据失效, 但仍提示用户
+            return {"ok": False, "nickname": "", "error": str(e)}
+        finally:
+            await client.close()
+
     # ---------- 签到 ----------
     @staticmethod
     def _mask_phone(phone: str) -> str:
