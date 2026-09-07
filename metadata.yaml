@@ -1,8 +1,8 @@
 name: astrbot_plugin_ama_10_entertainment_skland
 display_name: AMA-10 Entertainment Skland
 short_desc: 森空岛 (Skland) 验证码登录与多游戏每日签到插件（/skland 命令组）
-desc: 通过短信验证码登录森空岛获取 cred，为绑定的鹰角网络游戏（明日方舟、终末地等）执行每日签到，并同步签到森空岛论坛版块。一人一号凭据隔离、设备指纹持久化复用（4 万+ 真实机型池）、随机延迟静默自动签到。基于 App 版 API 实现，内置 HMAC-SHA256+MD5 签名算法。
-version: v0.4.0
+desc: 通过短信验证码登录森空岛获取 cred，为绑定的鹰角网络游戏（明日方舟、终末地等）执行每日签到，并同步签到森空岛论坛版块。一人一号凭据隔离、设备指纹持久化复用（官方设备中心 dId + 真实浏览器 UA 池轮换）、随机延迟静默自动签到。基于 Web 版 API 实现，内置 HMAC-SHA256+MD5 签名算法。
+version: v0.5.1
 author: Restart-Game-Lab
 repo: https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland
 license: AGPL-3.0

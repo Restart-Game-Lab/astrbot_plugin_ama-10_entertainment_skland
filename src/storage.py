@@ -117,12 +117,15 @@ class Storage:
     def set_auth(self, uid: str, phone: str, cred: str, token: str,
                  login_token: str = "", device_token: str = "",
                  hg_id: str = "", fingerprint: dict | None = None,
-                 nick_name: str = ""):
+                 nick_name: str = "", did: str = "",
+                 ua_used: str = ""):
         """保存指定用户的一个账号凭据, 同时登记手机号占用。
 
         ⚠️ 一人一手机号: 若该用户已有其他手机号, 先释放旧手机号占用再存新的。
-        fingerprint: 登录时使用的完整设备指纹(持久化复用, 防风控)。
+        fingerprint: 登录时使用的完整设备指纹(持久化复用, 防风控, 展示用)。
         nick_name: 森空岛用户名(展示用, 旧数据无则空)。
+        did: 官方设备中心签发的设备 ID (v0.5.0+, 持久化复用)。
+        ua_used: 登录时随机选用的浏览器 UA (v0.5.0+, 持久化复用防频繁更换)。
         """
         all_auth = self.load_auth()
         user_auth = all_auth.setdefault(uid, {})
@@ -140,6 +143,8 @@ class Storage:
             "hgId": hg_id,
             "nickName": nick_name,
             "fingerprint": fingerprint or {},
+            "did": did,              # v0.5.0: 官方设备中心 dId
+            "ua_used": ua_used,      # v0.5.0: 登录时选用的浏览器 UA
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         self._save_json(self._auth_file, all_auth)

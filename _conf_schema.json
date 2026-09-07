@@ -6,10 +6,10 @@
     "default": true
   },
   "auto_checkin_time": {
-    "description": "每日自动签到时间",
-    "hint": "每天自动签到的时刻 (24 小时制, HH:MM)。留空或非法则关闭自动签到。",
+    "description": "每日自动签到时间 (cron 表达式)",
+    "hint": "标准 5 段 cron 表达式 (分 时 日 月 周)，如 0 6 * * * 表示每天 06:00 签到。留空或非法则关闭自动签到。",
     "type": "string",
-    "default": "08:00"
+    "default": "0 6 * * *"
   },
   "random_delay_seconds": {
     "description": "自动签到随机延迟秒数",

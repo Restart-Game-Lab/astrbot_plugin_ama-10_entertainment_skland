@@ -26,7 +26,8 @@
 
 - **验证码登录** — 短信验证码完成登录，cred 持久化复用，一人一号
 - **每日自动签到** — 游戏 + 论坛双签到，随机延迟防风控，结果静默仅记日志
-- **设备指纹复用** — 登录时从 4 万+ 真实机型池随机取一台，之后全程复用同一指纹
+- **官方设备中心指纹** — 设备 ID (dId) 由官方设备中心签发并持久化复用；浏览器 UA 从真实 UA 池随机选取（登录时一次，之后恒定）
+- **Web 版稳定 API** — 森空岛业务接口走 Web 版签名 (platform=3)，支持明日方舟逐角色/终末地逐角色签到；内置重试与错误分类（登录过期自动提示重登）
 - **防重复识别** — "已签到/请勿重复"等状态自动识别，不视为失败
 
 ## 安装
@@ -37,7 +38,7 @@
 https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland
 ```
 
-然后重载插件即可（需安装 `requests`）。
+然后重载插件即可（需安装 `httpx`、`pycryptodome`、`APScheduler`，AstrBot 会自动安装）。
 
 ## 使用方法
 
@@ -45,9 +46,9 @@ https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland
 
 | 命令 | 说明 |
 | --- | --- |
-| `/skland login <手机号>` | 发送短信验证码，并在 60 秒内等待用户回复验证码完成登录（超时自动结束流程）。验证码格式不合法则静默忽略（不提示），合法则自动登录并展示登录用户/设备 |
-| `/skland checkin` | 用缓存凭据为当前用户签到所有绑定游戏 + 论坛版块（显示登录设备、游戏/论坛结果分组） |
-| `/skland status` | 查看当前用户绑定用户/登录设备与自动签到/游戏/论坛配置 |
+| `/skland login <手机号>` | 发送短信验证码，并在 60 秒内等待用户回复验证码完成登录（超时自动结束流程）。验证码格式不合法则静默忽略（不提示），合法则自动登录并展示登录用户 |
+| `/skland checkin` | 用缓存凭据为当前用户签到所有绑定游戏 + 论坛版块（显示游戏/论坛结果分组） |
+| `/skland status` | 查看当前用户绑定用户与自动签到/游戏/论坛配置 |
 | `/skland logout` | 清除当前用户的全部凭据（并释放手机号占用） |
 
 之后每天执行 `/skland checkin`（或开启自动签到）即可完成当日签到；cred 失效时插件会提示重新登录。
@@ -61,7 +62,7 @@ https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland
 | 配置项 | 说明 | 默认 |
 | --- | --- | --- |
 | `auto_checkin_enabled` | 自动签到总开关，关闭后即使设置了签到时间也不会自动签到 | `true` |
-| `auto_checkin_time` | 每日自动签到时刻（`HH:MM`，24 小时制），留空或非法则关闭 | `08:00` |
+| `auto_checkin_time` | 每日自动签到 cron 表达式（5 段：分 时 日 月 周），留空或非法则关闭 | `0 6 * * *` |
 | `random_delay_seconds` | 在目标时刻后随机延迟 0~N 秒再签到，避免固定时刻触发风控 | `1200` |
 | `request_timeout` | HTTP 请求超时（秒） | `15` |
 | `game_checkin_enabled` | 是否启用游戏签到 | `true` |

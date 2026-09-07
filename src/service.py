@@ -1,10 +1,17 @@
-"""src/service.py - 认证/签到业务服务
+"""src/service.py - 认证/签到业务服务 (v0.5.0 异步版)
 
 封装与 AstrBot 无关的纯业务逻辑:
-  - login(phone, code): 验证码完成登录, 返回凭据字典
+  - login(phone, code): 验证码完成登录, 返回凭据字典 (设备中心 dId + UA)
   - do_checkin(phone, auth): 对单个账号签到所有绑定游戏
-  - checkin_all(phone): 签到指定(或全部)账号, 返回展示文本
+  - checkin_all(uid): 签到指定(或全部)账号, 返回展示文本
   - 自动签到调度(auto_checkin_loop): 每日定时 + 随机延迟
+
+v0.5.0 变更:
+  - 全部改 async (httpx 异步)
+  - 登录/签到时自动生成/复用官方设备中心 dId (did.py)
+  - UA 登录时随机一次, 持久化复用 (ua_pool.py)
+  - 终末地逐角色签到 (roles 列表)
+  - 错误分类: CredExpiredError -> 提示重新登录
 """
 
 import asyncio
@@ -15,7 +22,8 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .client import SklandClient, dict_to_fingerprint, fingerprint_to_dict
+from .client import CredExpiredError, SklandClient
+from .did import get_device_id
 from .storage import Storage
 
 logger = logging.getLogger("ama10_skland")
@@ -31,30 +39,61 @@ class SklandService:
         self.game_enabled = game_enabled
         self.forum_enabled = forum_enabled
 
+    # ---------- 工具 ----------
+    @staticmethod
+    def _ensure_did_and_ua(auth: dict) -> tuple[str, str]:
+        """从凭据中取 did/ua; 缺失时生成 (did: 设备中心, ua: 随机)。
+
+        返回 (did, ua)。调用方负责把新值写回 (set_auth)。
+        """
+        did = auth.get("did") or ""
+        ua = auth.get("ua_used") or ""
+        return did, ua
+
     # ---------- 登录 ----------
-    def login(self, phone: str, code: str) -> dict:
+    @staticmethod
+    def _fallback_did() -> str:
+        """设备中心不可用时的本地随机兜底 dId (机制: 服务端可能拒绝但链路可通)"""
+        import hashlib as _hl
+        import uuid as _uuid
+        return "B" + _hl.md5(_uuid.uuid4().hex.encode()).hexdigest()[:16]
+
+    async def login(self, phone: str, code: str) -> dict:
         """执行完整验证码登录链路, 返回凭据字典(已由调用方负责保存)。
 
         抛出 RuntimeError 表示登录失败。
+        v0.5.0: 登录成功后生成设备中心 dId, UA 随机一次。
         """
         client = SklandClient(timeout=self.timeout)
-        token, hg_id, device_token = client.token_by_phone_code(phone, code)
         try:
-            u = client.basic_info(token)
-        except Exception:
-            u = {}
-        auth_code = client.grant(token, device_token)
-        cred, cred_token = client.generate_cred(auth_code)
+            token, hg_id, device_token = await client.token_by_phone_code(phone, code)
+            try:
+                u = await client.basic_info(token)
+            except Exception:
+                u = {}
 
-        # 森空岛真实用户名: 优先 user/me(App 同款, 带签名), 失败回退 basic_info
-        nick = ""
-        try:
-            me = client.user_me(cred, cred_token)
-            nick = (me.get("user") or {}).get("nickname") or ""
-        except Exception:
-            logger.debug("AMA-10 Skland: user/me 获取昵称失败, 回退 basic_info")
-        if not nick:
-            nick = u.get("nickName") or ""
+            # v0.5.0: 先申请官方设备中心 dId (grant 需要), UA 随机一次
+            try:
+                did = await get_device_id(timeout=self.timeout)
+            except Exception as e:
+                logger.warning(f"AMA-10 Skland: 设备中心 dId 申请失败, 使用本地随机兜底: {e}")
+                did = ""
+            client.did = did or self._fallback_did()
+
+            auth_code = await client.grant(token, device_token)
+            cred, cred_token = await client.generate_cred(auth_code)
+
+            # 森空岛真实用户名: 优先 user/me(App 同款, 带签名), 失败回退 basic_info
+            nick = ""
+            try:
+                me = await client.user_me(cred, cred_token)
+                nick = (me.get("user") or {}).get("nickname") or ""
+            except Exception:
+                logger.debug("AMA-10 Skland: user/me 获取昵称失败, 回退 basic_info")
+            if not nick:
+                nick = u.get("nickName") or ""
+        finally:
+            await client.close()
 
         return {
             "cred": cred,
@@ -63,17 +102,19 @@ class SklandService:
             "device_token": device_token,
             "hgId": hg_id,
             "nickName": nick or "(未设置昵称)",
-            # 登录使用的完整设备指纹(持久化复用)
-            "fingerprint": fingerprint_to_dict(client.fp),
-            "device_model": client.fp["device_model"],
-            "device_brand": client.fp.get("brand", ""),
-            "device_name": client.fp.get("device_name", ""),
+            # v0.5.0: 设备中心 dId + 真实浏览器 UA (持久化复用)
+            "did": client.did,
+            "ua_used": client.ua,
+            "fingerprint": {},  # 兼容字段保留空 (机型池已弃用)
         }
 
-    def send_code(self, phone: str):
+    async def send_code(self, phone: str):
         """发送短信验证码"""
         client = SklandClient(timeout=self.timeout)
-        client.send_phone_code(phone)
+        try:
+            await client.send_phone_code(phone)
+        finally:
+            await client.close()
 
     # ---------- 签到 ----------
     @staticmethod
@@ -81,7 +122,7 @@ class SklandService:
         """手机号遮罩 186****0000"""
         return f"{phone[:3]}****{phone[-4:]}"
 
-    def do_checkin(self, phone: str, auth: dict) -> dict:
+    async def do_checkin(self, phone: str, auth: dict) -> dict:
         """对单个账号执行签到，返回分组行列表 + 论坛球串。
 
         返回结构:
@@ -89,34 +130,51 @@ class SklandService:
           forum_row / forum_msg  : 论坛一行球串 / 附加说明(失败原因等)
         已签到视为成功(不算失败)。
 
-        设备指纹: 优先复用 auth["fingerprint"] (登录时存档, 保持恒定防风控);
-        存量账号无指纹时回退为新生成, 调用方负责写回。
+        v0.5.0: did/ua 从 auth 取 (缺失时生成, 调用方负责写回)。
         """
-        fp = auth.get("fingerprint") or {}
-        client = SklandClient(timeout=self.timeout,
-                              fp=dict_to_fingerprint(fp) if fp else None)
+        did, ua = self._ensure_did_and_ua(auth)
+        if not did:
+            try:
+                did = await get_device_id(timeout=self.timeout)
+            except Exception:
+                did = ""
+            if not did:
+                did = self._fallback_did()
+        client = SklandClient(timeout=self.timeout, did=did or None, ua=ua or None)
         cred, cred_token = auth["cred"], auth["token"]
 
-        groups = {"game_ok": [], "game_err": [],
-                  "forum_row": "", "forum_err": [],
-                  "fp": fingerprint_to_dict(client.fp)}  # 本次实际使用的设备指纹
+        groups = {
+            "game_ok": [], "game_err": [],
+            "forum_row": "", "forum_err": [],
+            "did": client.did,          # 本次实际使用的 dId (写回用)
+            "ua": client.ua,            # 本次实际使用的 UA (写回用)
+        }
 
         # ---- 游戏签到（受 game_enabled 开关控制）----
         if self.game_enabled:
-            bindings = client.get_binding_list(cred, cred_token)
+            try:
+                bindings = await client.get_binding_list(cred, cred_token)
+            except CredExpiredError as e:
+                groups["game_err"].append(f"⚠️ {e}")
+                bindings = []
+            except Exception as e:
+                groups["game_err"].append(f"⚠️ 绑定列表获取失败: {e}")
+                bindings = []
+
             for b in bindings:
                 name = f"{b.get('gameName')} | {b.get('nickName')}"
                 try:
-                    client.sign_attendance(cred, cred_token, b["gameId"], b, b.get("uid"))
+                    await client.sign_attendance(cred, cred_token, b["gameId"], b, b.get("uid"))
                     groups["game_ok"].append(f"🟢 {name}")
+                except CredExpiredError as e:
+                    groups["game_err"].append(f"🔴 {name} {e}")
                 except Exception as e:
                     groups["game_err"].append(f"🔴 {name} {e}")
 
         # ---- 论坛签到（受 forum_enabled 开关控制）----
         if self.forum_enabled:
             try:
-                # 先查状态: checked=True → 🟢; 未签则逐一签, 成功 🟢 / 失败 🔴
-                status_list = client.forum_checkin_status(cred, cred_token)
+                status_list = await client.forum_checkin_status(cred, cred_token)
                 balls = []
                 for item in status_list:
                     gid = item.get("gameId")
@@ -125,16 +183,23 @@ class SklandService:
                         balls.append("🟢")
                         continue
                     try:
-                        client.forum_checkin(cred, cred_token, gid)
+                        await client.forum_checkin(cred, cred_token, gid)
                         balls.append("🟢")
+                    except CredExpiredError as e:
+                        balls.append("🔴")
+                        groups["forum_err"].append(f"{name}: {e}")
                     except Exception as e:
                         balls.append("🔴")
                         groups["forum_err"].append(f"{name}: {e}")
                 groups["forum_row"] = " ".join(balls) if balls else "（无版块）"
+            except CredExpiredError as e:
+                groups["forum_row"] = "🔴"
+                groups["forum_err"].append(f"查询失败: {e}")
             except Exception as e:
                 groups["forum_row"] = "🔴"
                 groups["forum_err"].append(f"查询失败: {e}")
 
+        await client.close()
         return groups
 
     async def checkin_all(self, uid: str) -> str:
@@ -149,37 +214,33 @@ class SklandService:
 
         lines = []
         for p, a in auth.items():
-            # 设备行(取自 auth 存指纹, 与请求一致; 老账号无指纹显示未知)
-            dev = a.get("fingerprint") or {}
-            dev_txt = f"{dev.get('device_brand') or ''} | {dev.get('device_name') or ''}"
-            dev_txt = dev_txt.strip(" |") or "(未知)"
-            lines.append(f"[登录设备]: {dev_txt}")
-
             try:
-                g = await asyncio.to_thread(self.do_checkin, p, a)
+                g = await self.do_checkin(p, a)
+            except CredExpiredError as e:
+                lines.append(f"🟡 {self._mask_phone(p)} 凭据失效，请重新登录")
+                lines.append(f"   /skland login {self._mask_phone(p)}")
+                continue
             except Exception as e:
-                if any(k in str(e).lower() for k in ("cred", "401", "token", "未授权")):
-                    lines.append(f"🟡 {self._mask_phone(p)} 凭据失效，请重新登录")
-                    lines.append(f"   /skland login {self._mask_phone(p)}")
-                else:
-                    lines.append(f"🔴 {self._mask_phone(p)} 签到失败: {e}")
+                lines.append(f"🔴 {self._mask_phone(p)} 签到失败: {e}")
                 continue
 
-            # 存量账号无指纹: 签到成功后用本次实际指纹补写回凭据(之后恒定)
-            if not a.get("fingerprint") and g.get("fp"):
-                a["fingerprint"] = g["fp"]
+            # v0.5.0: 无 did/ua 的存量账号写回 (之后恒定)
+            if not a.get("did") or not a.get("ua_used"):
+                a["did"] = g.get("did", "")
+                a["ua_used"] = g.get("ua", "")
                 self.storage.set_auth(
                     uid, p,
                     cred=a["cred"], token=a["token"],
                     login_token=a.get("login_token", ""),
                     device_token=a.get("device_token", ""),
                     hg_id=a.get("hgId", ""),
-                    fingerprint=g["fp"],
+                    fingerprint=a.get("fingerprint") or {},
                     nick_name=a.get("nickName", ""),
+                    did=a.get("did", ""),
+                    ua_used=a.get("ua_used", ""),
                 )
 
             # 分组输出: [游戏签到] / [论坛签到] 段落 + 失败说明
-            # 标题按全局结果: 全成功=🟢签到完成 / 全失败=🔴签到失败 / 部分失败=🟡签到完成异常
             game_rows = g.get("game_ok", []) or ["🟢 (无绑定游戏)"]
             game_rows += g.get("game_err", [])
             game_ok_n = len(g.get("game_ok", []))
@@ -222,33 +283,32 @@ class SklandService:
 
 # ============================ 自动签到 ============================
 class AutoCheckinScheduler:
-    """每日自动签到调度器（基于 APScheduler AsyncIOScheduler）。
+    """自动签到调度器（基于 APScheduler AsyncIOScheduler + CronTrigger）。
 
     参考 Azincc/astrbot_plugin_skland 的定时方案:
-      - AsyncIOScheduler + CronTrigger(hour, minute): 到点触发
+      - AsyncIOScheduler + CronTrigger.from_crontab(表达式): 按 cron 触发
       - misfire_grace_time: 错过触发时间(如休眠/重启)仍补执行
       - 随机延迟 0~random_delay 秒 + 按日期去重, 避免重复/固定时刻风控
     ⚠️ 静默模式: 不推送任何消息, 结果仅记录日志。
 
     生命周期:
-      - start(): 启动调度器并注册每日任务（建议在 Star.initialize() 中调用）
+      - start(): 启动调度器并注册任务（建议在 Star.initialize() 中调用）
       - stop(): 停止调度器并取消任务（建议在 Star.terminate() 中调用）
     """
 
     def __init__(self, service: SklandService,
-                 auto_time: str | None,
+                 auto_cron: str | None,
                  random_delay: int = 0):
         self.service = service
-        self.auto_time = auto_time  # "HH:MM" 或 None(关闭)
+        self.auto_cron = auto_cron  # cron 表达式, 如 "0 6 * * *", None=关闭
         self.random_delay = max(int(random_delay), 0)
         self._last_checkin_date = ""
         self._scheduler: AsyncIOScheduler | None = None
 
     def start(self):
         """启动调度器（幂等）"""
-        if not self.auto_time or self._scheduler is not None:
+        if not self.auto_cron or self._scheduler is not None:
             return
-        hour, minute = int(self.auto_time[:2]), int(self.auto_time[3:5])
         self._scheduler = AsyncIOScheduler()
         try:
             # 先移除旧任务(重载插件时防重复注册)
@@ -257,13 +317,13 @@ class AutoCheckinScheduler:
             pass
         self._scheduler.add_job(
             self._run_once,
-            trigger=CronTrigger(hour=hour, minute=minute),
+            trigger=CronTrigger.from_crontab(self.auto_cron),
             id="skland_auto_checkin",
             misfire_grace_time=3600,  # 错过(休眠/暂停)1小时内仍补执行
             replace_existing=True,
         )
         self._scheduler.start()
-        logger.info(f"AMA-10 Skland: 自动签到任务已启动，每天 {hour:02d}:{minute:02d} 执行")
+        logger.info(f"AMA-10 Skland: 自动签到任务已启动, cron 表达式: {self.auto_cron}")
 
     def stop(self):
         """停止调度器（幂等）"""

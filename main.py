@@ -1,4 +1,4 @@
-"""main.py - AMA-10 Entertainment Skland 插件主文件
+"""main.py - AMA-10 Entertainment Skland 插件主文件 (v0.5.1)
 
 命令组 /skland:
   /skland login <手机号>    发送短信验证码, 然后等待用户在 60s 内回复验证码;
@@ -8,11 +8,13 @@
   /skland checkin          手动签到一次(当前用户全部游戏+论坛)
 
 自动签到:
-  配置 auto_checkin_time (HH:MM) 每天自动签到; 每次在目标时刻后随机延迟
-  0~random_delay_seconds 秒执行。⚠️ 静默模式: 不推送任何消息, 结果仅记日志。
+  配置 auto_checkin_time (cron 表达式, 默认 "0 6 * * *" = 每天 6:00) 定时自动签到;
+  每次在目标时刻后随机延迟 0~random_delay_seconds 秒执行。⚠️ 静默模式: 不推送任何消息, 结果仅记日志。
 
 业务逻辑(签名/登录链路/存储/自动签到调度)见 src/:
-  src/client.py  森空岛 API 客户端
+  src/client.py  森空岛 API 客户端 (Web 版签名 platform=3, 设备中心 dId)
+  src/did.py     官方设备中心 dId 生成 (DES/AES/RSA 指纹上报)
+  src/ua_pool.py 真实浏览器 UA 池 (data/browsers.jsonl)
   src/storage.py 凭据/占用/推送目标存储
   src/service.py 登录/签到业务服务 + 静默自动签到调度器
 """
@@ -61,7 +63,7 @@ _PLUGIN_ID = "astrbot_plugin_ama_10_entertainment_skland"
     "astrbot_plugin_ama_10_entertainment_skland",
     "Restart-Game-Lab",
     "森空岛 (Skland) 验证码登录与多游戏每日签到插件（/skland 命令组）",
-    "v0.4.0",
+    "v0.5.1",
     "https://github.com/Restart-Game-Lab/astrbot_plugin_ama-10_entertainment_skland",
 )
 class Main(Star):
@@ -83,7 +85,7 @@ class Main(Star):
 
         # 自动签到配置
         self._auto_checkin_enabled = bool(self.config.get("auto_checkin_enabled", True))
-        self._auto_time = self._parse_auto_time(self.config.get("auto_checkin_time", "08:00"))
+        self._auto_cron = self._parse_auto_cron(self.config.get("auto_checkin_time", "0 6 * * *"))
         self._random_delay = max(int(self.config.get("random_delay_seconds", 1200)), 0)
 
         # 自动撤回配置（消息显示几秒后自动撤回 + 阻断 LLM 链路）
@@ -101,7 +103,7 @@ class Main(Star):
         #    但 APScheduler 的 AsyncIOScheduler 在 initialize() 中启动更可靠
         self.scheduler = AutoCheckinScheduler(
             service=self.service,
-            auto_time=self._auto_time if self._auto_checkin_enabled else None,
+            auto_cron=self._auto_cron if self._auto_checkin_enabled else None,
             random_delay=self._random_delay,
         )
 
@@ -110,8 +112,8 @@ class Main(Star):
         self.scheduler.start()
         if not self._auto_checkin_enabled:
             logger.info("AMA-10 Skland: 自动签到已关闭 (auto_checkin_enabled=false)")
-        elif not self._auto_time:
-            logger.info("AMA-10 Skland: 自动签到未启用 (auto_checkin_time 为空)")
+        elif not self._auto_cron:
+            logger.info("AMA-10 Skland: 自动签到未启用 (auto_checkin_time cron 非法)")
 
     async def terminate(self):
         """插件卸载/重载时调用: 停止自动签到调度, 避免残留任务重复触发"""
@@ -179,17 +181,22 @@ class Main(Star):
 
     # ---------- 配置 ----------
     @staticmethod
-    def _parse_auto_time(raw: str):
-        """解析 HH:MM 配置, 非法返回 None"""
+    def _parse_auto_cron(raw: str):
+        """解析 cron 表达式配置, 非法返回 None。
+
+        标准 5 段 cron (分 时 日 月 周), 如 "0 6 * * *" = 每天 06:00。
+        """
         if not raw:
             return None
-        m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(raw).strip())
-        if not m:
+        expr = str(raw).strip()
+        if not expr:
             return None
-        hour, minute = int(m.group(1)), int(m.group(2))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        try:
+            from apscheduler.triggers.cron import CronTrigger
+            CronTrigger.from_crontab(expr)
+            return expr
+        except Exception:
             return None
-        return f"{hour:02d}:{minute:02d}"
 
     # ---------- 用户身份 key ----------
     @staticmethod
@@ -240,7 +247,7 @@ class Main(Star):
         code = msg
 
         try:
-            auth = await asyncio.to_thread(self.service.login, session.phone, code)
+            auth = await self.service.login(session.phone, code)
         except Exception as e:
             await self._send_and_recall(
                 event,
@@ -260,16 +267,15 @@ class Main(Star):
             hg_id=auth["hgId"],
             fingerprint=auth.get("fingerprint"),
             nick_name=auth.get("nickName", ""),
+            did=auth.get("did", ""),
+            ua_used=auth.get("ua_used", ""),
         )
         self.storage.save_sub(session.uid, self._uid(event))  # 推送目标按用户 key 存
-        dev = f"{auth.get('device_brand', '')} | {auth.get('device_name', '')}".strip(" |")
         nick = auth.get("nickName", "(未设置昵称)")
-        dev_txt = f"[登录设备]: {dev}\n" if dev else ""
         await self._send_and_recall(
             event,
             f"🟢 登录成功\n"
             f"[登录用户]: {nick} | {session.phone[:3]}****{session.phone[-4:]} (hgId={auth['hgId']})\n"
-            f"{dev_txt}"
             "凭据已保存，可随时 /skland checkin 签到",
             scope="login",
         )
@@ -332,7 +338,7 @@ class Main(Star):
 
         # ① 发送验证码
         try:
-            self.service.send_code(phone)
+            await self.service.send_code(phone)
         except Exception as e:
             await self._send_and_recall(
                 event,
@@ -418,18 +424,14 @@ class Main(Star):
             nick = a.get("nickName") or "(未设置昵称)"
             lines = [f"🟢 已绑定 {self._mask_phone(phone)}"]
             lines.append(f"[登录用户]: {nick} | {self._mask_phone(phone)}")
-            dev = a.get("fingerprint") or {}
-            dev_txt = f"{dev.get('device_brand') or ''} | {dev.get('device_name') or '(未知)'}"
-            dev_txt = dev_txt.strip(" |") or "(未知)"
-            lines.append(f"[登录设备]: {dev_txt}")
         else:
             lines = ["🟡 未绑定手机号"]
 
         game_txt = "开启" if self.service.game_enabled else "关闭"
         forum_txt = "开启" if self.service.forum_enabled else "关闭"
-        auto_on = self._auto_checkin_enabled and bool(self._auto_time)
+        auto_on = self._auto_checkin_enabled and bool(self._auto_cron)
         lines.append("[签到配置]:")
-        lines.append(f"自动签到: {'开启 (' + self._auto_time + ')' if auto_on else '关闭'}")
+        lines.append(f"自动签到: {'开启 (' + self._auto_cron + ')' if auto_on else '关闭'}")
         lines.append(f"随机延迟: {self._random_delay}s")
         lines.append(f"游戏签到: {game_txt}")
         lines.append(f"论坛签到: {forum_txt}")
