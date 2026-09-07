@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://count.getloli.com/@preca-hoshino?name=ama-10_entertainment_skland&theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
+<img src="https://count.getloli.com/@astrbot_plugin_ama_10_entertainment_skland?theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
 
 **Skland Daily Sign-in Plugin** — Log in with a phone verification code, auto sign in for all bound Hypergryph games.
 

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://count.getloli.com/@preca-hoshino?name=ama-10_entertainment_skland&theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
+<img src="https://count.getloli.com/@astrbot_plugin_ama_10_entertainment_skland?theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
 
 **森空岛（Skland）每日签到插件** — 手机验证码登录，自动为绑定的鹰角游戏签到。
 
