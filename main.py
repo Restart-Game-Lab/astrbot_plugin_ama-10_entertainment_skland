@@ -5,6 +5,7 @@
                              超时则提示结束流程; 收到验证码走正常登录流程
   /skland logout           清除当前用户全部凭据(释放手机号占用)
   /skland status           查看当前用户凭据/自动签到配置
+  /skland status_all       管理员查看全部用户登录状态总览
   /skland checkin          手动签到一次(当前用户全部游戏+论坛)
 
 自动签到:
@@ -26,6 +27,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import PermissionType, permission_type
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .src.api.client import SklandClient
@@ -450,6 +452,57 @@ class Main(Star):
         lines.append(f"随机延迟: {self._random_delay}s")
         lines.append(f"游戏签到: {game_txt}")
         lines.append(f"论坛签到: {forum_txt}")
+        await self._send_and_recall(event, "\n".join(lines), scope="status")
+        self._stop_and_block_llm(event)
+
+    @permission_type(PermissionType.ADMIN)
+    @skland.command("status_all")
+    async def skland_status_all(self, event: AstrMessageEvent):
+        """/skland status_all: 管理员查看全部用户登录状态总览
+
+        并发验证所有已登录账号的登录态, 每行三色球 + 森空岛昵称 + 掩码手机号,
+        底部汇总三色计数。非管理员无权调用(permission_type 拦截)。
+        """
+        all_auth = self.storage.load_auth()
+        if not all_auth:
+            await self._send_and_recall(
+                event,
+                "登录总览（共 0 个用户）\n\n🟡 暂无用户登录",
+                scope="status",
+            )
+            self._stop_and_block_llm(event)
+            return
+
+        # 展开为 (uid, phone, auth) 列表, 并发验证登录态 (check_auth 内部不抛异常)
+        entries = [
+            (uid, phone, a)
+            for uid, auths in all_auth.items()
+            for phone, a in auths.items()
+        ]
+        results = await asyncio.gather(
+            *(self.service.check_auth(a) for _, _, a in entries),
+            return_exceptions=True,
+        )
+
+        ok_n = err_n = warn_n = 0
+        lines = [f"登录总览（共 {len(entries)} 个账号）", ""]
+        for (_, phone, a), res in zip(entries, results):
+            nick = a.get("nickName") or "(未设置昵称)"
+            phone_m = self._mask_phone(phone)
+            if isinstance(res, Exception):
+                mark, suffix = "🟡", "（检查失败）"
+                warn_n += 1
+            elif res.get("ok"):
+                nick = res.get("nickname") or nick  # 实时刷新昵称
+                mark, suffix = "🟢", ""
+                ok_n += 1
+            else:
+                mark, suffix = "🔴", "（已失效）"
+                err_n += 1
+            lines.append(f"{mark} {nick} | {phone_m}{suffix}")
+
+        lines.append("")
+        lines.append(f"[汇总]: 🟢 {ok_n} · 🔴 {err_n} · 🟡 {warn_n}")
         await self._send_and_recall(event, "\n".join(lines), scope="status")
         self._stop_and_block_llm(event)
 
