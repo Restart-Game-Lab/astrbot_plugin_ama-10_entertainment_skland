@@ -79,12 +79,20 @@ astrbot_plugin_ama-10_entertainment_skland/
 ├── _conf_schema.json  # 插件配置(自动签到/超时/开关)
 ├── requirements.txt   # 依赖
 ├── data/
-│   └── devices.json   # 安卓机型库(4 万+ 台, bsthen/device-models)
-└── src/               # 业务逻辑层(与 AstrBot 解耦)
-    ├── client.py      # 森空岛 API 客户端(签名/登录链路/签到/指纹)
-    ├── device_pool.py # 机型池加载与随机选取
-    ├── storage.py     # 凭据与手机号占用存储(含指纹)
-    └── service.py     # 登录/签到业务服务 + 自动签到调度器
+│   ├── browsers.jsonl # 真实浏览器 UA 池(fake-useragent, Apache-2.0)
+│   └── devices.json   # 安卓机型库(4 万+ 台, bsthen/device-models, 展示备用)
+└── src/               # 业务逻辑层(与 AstrBot 解耦, 按层划分)
+    ├── api/           # API 通信层(纯 Python, 可独立复用)
+    │   ├── client.py      # 森空岛 API 客户端(Web 版签名/登录链路/签到)
+    │   ├── did.py         # 官方设备中心 dId 生成(DES/AES/RSA)
+    │   ├── ua_pool.py     # 真实浏览器 UA 池加载与随机选取
+    │   └── device_pool.py # 安卓机型池(展示备用)
+    ├── services/      # 业务层(纯 Python)
+    │   └── service.py     # 登录/签到/登录态校验 + 自动签到调度器
+    ├── storage/       # 存储层
+    │   └── storage.py     # 凭据与手机号占用存储(按用户隔离)
+    └── utils/         # 工具层
+        └── recall.py      # 消息自动撤回 + LLM 阻断辅助
 ```
 
 （凭据数据运行时生成于 `data/plugin_data/astrbot_plugin_ama_10_entertainment_skland/`）

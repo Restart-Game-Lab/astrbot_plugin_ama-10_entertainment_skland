@@ -22,9 +22,9 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .client import CredExpiredError, SklandClient
-from .did import get_device_id
-from .storage import Storage
+from ..api.client import CredExpiredError, SklandClient
+from ..api.did import get_device_id
+from ..storage.storage import Storage
 
 logger = logging.getLogger("ama10_skland")
 

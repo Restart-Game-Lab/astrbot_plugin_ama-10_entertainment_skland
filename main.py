@@ -28,10 +28,10 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from .src.client import SklandClient
-from .src.recall import RecallManager
-from .src.service import AutoCheckinScheduler, SklandService
-from .src.storage import Storage
+from .src.api.client import SklandClient
+from .src.utils.recall import RecallManager
+from .src.services.service import AutoCheckinScheduler, SklandService
+from .src.storage.storage import Storage
 
 # 验证码等待超时(秒)
 CODE_WAIT_TIMEOUT = 60
