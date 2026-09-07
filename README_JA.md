@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://count.getloli.com/@astrbot_plugin_ama_10_entertainment_skland?theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
+<img src="https://count.getloli.com/@ama_10_entertainment_skland?theme=rule34&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto" alt="Moe Counter">
 
 **Skland（森空岛）デイリーサインイン プラグイン** — 携帯の SMS 認証コードでログインし、連携中のハイパーグリフゲームへ自動でサインインします。
 
