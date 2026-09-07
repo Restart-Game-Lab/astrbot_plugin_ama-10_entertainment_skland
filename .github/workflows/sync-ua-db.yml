@@ -1,0 +1,110 @@
+name: Sync user-agent database
+
+# 与 sync-device-db.yml 相同的同步策略:
+#   每月 1 号检查一次上游 UA 库 (fake-useragent/fake-useragent 的 browsers.jsonl),
+#   有变化则创建 PR, 人工 review 后合并; 支持手动触发。
+#
+# 数据源说明:
+#   fake-useragent (Apache-2.0) 的 data/browsers.jsonl 来自 user-agents.net
+#   实时统计, 含真实浏览器 UA + percent 份额权重 + browser/os/type 分类。
+#   上游仓库已于 2026-04-01 归档(只读), 但数据文件仍保留且格式稳定。
+
+"on":
+  schedule:
+    # 每月 1 号 02:00 UTC (北京 10:00) 检查一次上游 UA 库
+    - cron: '0 2 1 * *'
+  workflow_dispatch:  # 手动触发
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-uas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download latest browsers.jsonl from upstream
+        run: |
+          curl -fsSL -o data/browsers.jsonl \
+            https://raw.githubusercontent.com/fake-useragent/fake-useragent/main/src/fake_useragent/data/browsers.jsonl
+
+      - name: Validate downloaded file
+        run: |
+          # 校验 JSONL 格式: 每行都必须是合法 JSON, 且包含 useragent 字段
+          python3 - <<'EOF'
+          import json, sys
+
+          path = "data/browsers.jsonl"
+          count = 0
+          with open(path, encoding="utf-8") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      entry = json.loads(line)
+                  except json.JSONDecodeError as e:
+                      print(f"::error::browsers.jsonl 第 {count+1} 行不是合法 JSON: {e}")
+                      sys.exit(1)
+                  if "useragent" not in entry:
+                      print(f"::error::第 {count+1} 行缺少 useragent 字段")
+                      sys.exit(1)
+                  if "percent" not in entry:
+                      print(f"::error::第 {count+1} 行缺少 percent 字段")
+                      sys.exit(1)
+                  count += 1
+
+          if count < 100:
+              print(f"::error::UA 库行数异常 ({count} 行 < 100), 拒绝更新")
+              sys.exit(1)
+
+          mobiles = 0
+          with open(path, encoding="utf-8") as f:
+              for line in f:
+                  if '"type": "mobile"' in line:
+                      mobiles += 1
+          if mobiles == 0:
+              print("::error::UA 库中无 mobile 类型条目, 拒绝更新")
+              sys.exit(1)
+
+          print(f"::notice::UA 库校验通过: {count} 条 (mobile {mobiles} 条)")
+          EOF
+
+      - name: Detect changes
+        id: changes
+        run: |
+          if git diff --quiet -- data/browsers.jsonl; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::UA 库无变化，无需更新"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and open PR
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          BRANCH="ci/sync-ua-db-$(date +%Y%m%d%H%M)"
+          git checkout -b "$BRANCH"
+          git add data/browsers.jsonl
+          git commit -m "chore: 同步上游 UA 库 browsers.jsonl (来自 fake-useragent)"
+          git push origin "$BRANCH"
+
+          # 若已有同名 PR 则跳过
+          if gh pr list --head "$BRANCH" --json number -q ".[0].number" >/dev/null 2>&1; then
+            echo "::notice::上游 UA 库 PR 已存在"
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: 同步 UA 库 browsers.jsonl ($(date +%Y-%m-%d))" \
+            --body "每月自动从 fake-useragent (Apache-2.0, user-agents.net 真实流量统计) 同步最新 data/browsers.jsonl。UA 池更新, 无破坏性变更, 请 review 后合并。"
